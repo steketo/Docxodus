@@ -1,0 +1,77 @@
+# I binari redline del ramo autorel (SCR di AutoRel, disegno §2.A). Parte solo a mano, con la versione
+# <versione dell'originale>.<n>; rifiuta una versione già pubblicata; pubblica autorel-<versione> con SHA256SUMS.
+name: autorel-redline
+on:
+  workflow_dispatch:
+    inputs:
+      versione:
+        description: "Versione del binario, a.b.c.n (es. 14.1.0.1)"
+        required: true
+permissions:
+  contents: write
+jobs:
+  controlla:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: t
+        env:
+          VERSIONE: ${{ inputs.versione }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$VERSIONE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || { echo "versione non nella forma a.b.c.n: $VERSIONE"; exit 1; }
+          tag="autorel-$VERSIONE"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "la versione $tag è già pubblicata e non si riscrive"; exit 1
+          fi
+          sh scripts/autorel/controlla-flussi.sh
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+  compila:
+    needs: controlla
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            nome: redline-linux-x64
+          - os: windows-latest
+            rid: win-x64
+            nome: redline-win-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: dotnet publish, come publish.yml dell'originale (riga 153)
+        run: dotnet publish tools/redline/redline.csproj -c Release -r ${{ matrix.rid }} --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:PublishTrimmed=true -p:Version=${{ inputs.versione }} -o ./publish
+      - name: prova di fumo, come publish.yml dell'originale (riga 161)
+        shell: bash
+        run: ./publish/redline TestFiles/WC/WC001-Digits.docx TestFiles/WC/WC001-Digits-Mod.docx "$RUNNER_TEMP/smoke-redline.docx"
+      - name: nome della versione
+        shell: bash
+        run: |
+          if [ "${{ matrix.rid }}" = win-x64 ]; then mv publish/redline.exe "${{ matrix.nome }}"; else mv publish/redline "${{ matrix.nome }}"; fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.nome }}
+          path: ${{ matrix.nome }}
+  pubblica:
+    needs: [controlla, compila]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: binari
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.controlla.outputs.tag }}
+        run: |
+          cd binari
+          sha256sum redline-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" redline-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "redline di Docxodus, ramo autorel a $GITHUB_SHA (copia di AutoRel; correzioni in AUTOREL.md)"
