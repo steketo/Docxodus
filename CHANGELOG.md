@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep each field's cached result inside its own field when comparing a paragraph whose cross-references are
+  renumbered. The result text of every field was diffed as one text with its neighbours, so a run of `REF`
+  fields to consecutive figures shifted by one (Figure 27…33 → 26…32) paired the numbers across field
+  boundaries, and rejecting the redline moved a number into the neighbouring field. In a paired paragraph whose
+  fields are the same on both sides, the tokens of the k-th field's result now carry that field's ordinal in
+  their match key, as hyperlink text carries its target.
+
 ## [14.1.0] - 2026-10-21
 
 ### Added

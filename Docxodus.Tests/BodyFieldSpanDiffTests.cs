@@ -350,7 +350,42 @@ public class BodyFieldSpanDiffTests
         AssertShapesSurviveRoundTrip(original, revised, DocxCompare.Compare(original, revised), name, markers: false);
     }
 
-    // ---- field characters both documents carry (issue #1165) ---------------------------------
+    // ---- consecutive cross-references renumbered ------------------------------------------------
+
+    /// <summary>A figure is added before a run of cross-references to consecutive figures: every REF keeps its
+    /// bookmark and only its number changes (Figure 27…32 → 26…31). Each field must keep its own result: rejecting
+    /// the redline gives back the original pairs (instruction, result), accepting it the revised ones, and the field
+    /// characters stay bare. Before the fix the cached results were diffed as one text across the field boundaries
+    /// and rejecting moved each number into the neighbouring field.</summary>
+    [Theory]
+    [InlineData(3, ", ")]
+    [InlineData(3, "")]
+    [InlineData(7, ", ")]
+    public void Compare_ConsecutiveRefFieldsRenumbered_EachFieldKeepsItsResult(int count, string separator)
+    {
+        string Refs(int first)
+        {
+            var parts = new List<string> { R("See ") };
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0 && separator.Length > 0)
+                    parts.Add(R(separator));
+                parts.Add(Field($"REF _Ref_fig_{i} \\h", $"Figure {first + i}"));
+            }
+            parts.Add(R("."));
+            return Para(parts.ToArray());
+        }
+
+        var original = MarkerDoc(Refs(27));
+        var revised = MarkerDoc(Refs(26));
+        var redline = DocxCompare.Compare(original, revised);
+
+        AssertShapesSurviveRoundTrip(original, revised, redline, $"{count} consecutive REF fields", markers: false);
+        AssertFieldCharacterCounts(original, revised, redline);
+        AssertFieldCharactersBare(redline, expectedCount: 3 * count);
+    }
+
+    // ---- field characters both documents carry (issue #1165)---------------------------------
 
     private const string BeginChar = "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>";
     private const string SeparateChar = "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>";

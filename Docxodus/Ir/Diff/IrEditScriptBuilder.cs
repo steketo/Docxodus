@@ -1843,8 +1843,12 @@ internal static class IrEditScriptBuilder
 
         // When nesting, mask the placeholder tokens so the paragraph token diff does not also report the
         // textbox change; otherwise tokenize normally.
-        var leftTokens = IrDiffTokenizer.Tokenize(lp, settings);
-        var rightTokens = IrDiffTokenizer.Tokenize(rp, settings);
+        // Paired paragraphs whose field envelopes match carry the same fields in the same order: scope each field's
+        // cached-result tokens to its ordinal so a renumbered run of cross-references diffs inside each field
+        // instead of shifting numbers across field boundaries.
+        bool scopeFields = !StructuralCarrierDiffers(lp, rp);
+        var leftTokens = IrDiffTokenizer.Tokenize(lp, settings, scopeFields);
+        var rightTokens = IrDiffTokenizer.Tokenize(rp, settings, scopeFields);
         var diffLeft = nest ? MaskTextboxKeys(leftTokens) : leftTokens;
         var diffRight = nest ? MaskTextboxKeys(rightTokens) : rightTokens;
         var tokenDiff = IrTokenDiffer.Diff(diffLeft, diffRight, settings,

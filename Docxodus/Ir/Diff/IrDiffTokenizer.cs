@@ -51,14 +51,27 @@ internal static class IrDiffTokenizer
     // distinct body (`iw:`) so it can never alias an atomic key. See InterruptionPostPass.
     private const string InterruptionMarkerPrefix = "iw:";
 
-    public static IReadOnlyList<IrDiffToken> Tokenize(IrParagraph paragraph, IrDiffSettings settings)
+    public static IReadOnlyList<IrDiffToken> Tokenize(IrParagraph paragraph, IrDiffSettings settings) =>
+        Tokenize(paragraph, settings, scopeFieldResults: false);
+
+    /// <summary>
+    /// As <see cref="Tokenize(IrParagraph, IrDiffSettings)"/>; with <paramref name="scopeFieldResults"/> every
+    /// word/separator token of the cached result of the k-th field (document order, nested fields composed like
+    /// hyperlink targets) gets a <c>fld:k</c> MatchKey suffix, so the token differ never pairs the result text of
+    /// one field with the result text of another. Only valid when both paragraphs carry the same fields in the same
+    /// order — the caller checks the field envelopes — so field k on the left is field k on the right.
+    /// </summary>
+    internal static IReadOnlyList<IrDiffToken> Tokenize(
+        IrParagraph paragraph, IrDiffSettings settings, bool scopeFieldResults)
     {
         var tokens = new List<IrDiffToken>();
         int charOffset = 0;
         var textRunEdges = GetTextRunEdges(paragraph.Inlines);
         int textRunIndex = 0;
+        int fieldOrdinal = scopeFieldResults ? 0 : -1;
         WalkInlines(
-            paragraph.Inlines, settings, linkSuffix: null, textRunEdges, ref textRunIndex, tokens, ref charOffset);
+            paragraph.Inlines, settings, linkSuffix: null, textRunEdges, ref textRunIndex, tokens, ref charOffset,
+            ref fieldOrdinal);
         InterruptionPostPass(tokens);
         return tokens;
     }
@@ -232,12 +245,13 @@ internal static class IrDiffTokenizer
     /// Walk an inline list in document order, appending tokens and advancing <paramref name="charOffset"/>.
     /// <paramref name="linkSuffix"/> is the accumulated hyperlink-target suffix to append to every
     /// word/separator MatchKey produced within this scope (composed in document order — an outer link
-    /// applied before an inner link).
+    /// applied before an inner link). <paramref name="fieldOrdinal"/> is the next field's ordinal for
+    /// <c>fld:k</c> scoping, or −1 when field results are not scoped.
     /// </summary>
     private static void WalkInlines(
         IReadOnlyList<IrInline> inlines, IrDiffSettings settings, string? linkSuffix,
         IReadOnlyList<TextRunEdges> textRunEdges, ref int textRunIndex,
-        List<IrDiffToken> tokens, ref int charOffset)
+        List<IrDiffToken> tokens, ref int charOffset, ref int fieldOrdinal)
     {
         foreach (var inline in inlines)
         {
@@ -253,10 +267,17 @@ internal static class IrDiffTokenizer
                 case IrFieldRun field:
                     // §6.1 / N9: the cached result is tokenized transparently — its IrTextRuns are
                     // indistinguishable from literal text, and (like the reader) their chars advance
-                    // the offset. The instruction is never tokenized.
+                    // the offset. The instruction is never tokenized. When scoping is on, the result's
+                    // tokens carry the field's ordinal so results of different fields never pair.
+                    string? fieldSuffix = linkSuffix;
+                    if (fieldOrdinal >= 0)
+                    {
+                        var scope = FieldSuffix(fieldOrdinal++);
+                        fieldSuffix = linkSuffix is null ? scope : linkSuffix + scope;
+                    }
                     WalkInlines(
-                        field.CachedResult, settings, linkSuffix,
-                        textRunEdges, ref textRunIndex, tokens, ref charOffset);
+                        field.CachedResult, settings, fieldSuffix,
+                        textRunEdges, ref textRunIndex, tokens, ref charOffset, ref fieldOrdinal);
                     break;
 
                 case IrHyperlink link:
@@ -267,7 +288,7 @@ internal static class IrDiffTokenizer
                     var composed = linkSuffix is null ? LinkSuffix(target) : linkSuffix + LinkSuffix(target);
                     WalkInlines(
                         link.Inlines, settings, composed,
-                        textRunEdges, ref textRunIndex, tokens, ref charOffset);
+                        textRunEdges, ref textRunIndex, tokens, ref charOffset, ref fieldOrdinal);
                     break;
 
                 case IrTab tab:
@@ -458,6 +479,8 @@ internal static class IrDiffTokenizer
 
     private static string ApplyLink(string key, string? linkSuffix) =>
         linkSuffix is null ? key : key + linkSuffix;
+
+    private static string FieldSuffix(int ordinal) => "fld:" + ordinal.ToString(CultureInfo.InvariantCulture);
 
     private static string LinkSuffix(string target) => "lnk:" + target;
 
