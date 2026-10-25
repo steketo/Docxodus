@@ -25,3 +25,4 @@ bozze `.docx` con le proposte come revisioni native di Word, senza Word (voce SC
 
 | correzione | prova | richiesta di fusione |
 |---|---|---|
+| Rinumero dei rinvii consecutivi: i token del risultato del k-esimo campo hanno il suffisso `fld:k` nel diff del capoverso accoppiato coi campi uguali (`IrDiffTokenizer.cs`, `IrEditScriptBuilder.cs`) | `BodyFieldSpanDiffTests.Compare_ConsecutiveRefFieldsRenumbered_EachFieldKeepsItsResult` (rosso sul caso di 7 rinvii prima della correzione) | da aprire |
