@@ -70,6 +70,25 @@ public class DocxDiffBookmarkStructureTests
         Assert.True(onlyEnd.Count == 0, $"[{scenario}] bookmarkEnd id(s) without matching Start: [{string.Join(",", onlyEnd)}]");
     }
 
+    /// <summary>Every bookmark NAME appears on one <c>w:bookmarkStart</c> only in the Compare output, as in each
+    /// source. Word keeps a single bookmark per name: with a second copy (the deleted paragraph's, in its
+    /// <c>w:del</c>) next to the inserted paragraph's copy, accepting every revision in Word leaves the REF fields
+    /// to that name unresolved («Error! Reference source not found.»). The intermediate must carry one bookmark
+    /// per name, like Word's own compare.</summary>
+    [Theory]
+    [MemberData(nameof(AllScenarios))]
+    public void Bookmark_Compare_HasUniqueBookmarkNames(string scenario)
+    {
+        var (left, right) = DocxDiffBookmarkFixtures.Build(scenario);
+        var result = DocxDiff.Compare(left, right);
+
+        var (_, _, names) = BookmarkMarkers(result);
+        var duplicated = names.GroupBy(n => n, StringComparer.Ordinal).Where(g => g.Count() > 1)
+            .Select(g => $"{g.Key}x{g.Count()}").ToList();
+        Assert.True(duplicated.Count == 0,
+            $"[{scenario}] bookmark name(s) on more than one bookmarkStart: [{string.Join(",", duplicated)}]");
+    }
+
     [Theory]
     [MemberData(nameof(AllScenarios))]
     public void Bookmark_RoundTrips_AtStructureLevel(string scenario)

@@ -12,6 +12,13 @@ All notable changes to this project will be documented in this file.
   boundaries, and rejecting the redline moved a number into the neighbouring field. In a paired paragraph whose
   fields are the same on both sides, the tokens of the k-th field's result now carry that field's ordinal in
   their match key, as hyperlink text carries its target.
+- Write a bookmark once when a paragraph that carries it is compared as a whole deletion. The deleted paragraph
+  kept its `w:bookmarkStart`, and the inserted paragraph, or an unchanged one that took the bookmark, kept another
+  with the same name (only the ids were made unique); Word keeps one bookmark per name, and after Accept All its
+  `REF` fields to that bookmark printed "Error! Reference source not found.". The deleted copy is now dropped, as
+  Word's own compare does, and an inserted copy is lifted out of its `w:ins`, so the name survives accept and
+  reject; a copy between blocks stays tracked, and the name then survives accept only. A name the revised
+  document itself repeats is left as it is.
 
 ## [14.1.0] - 2026-10-21
 

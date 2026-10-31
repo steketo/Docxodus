@@ -174,6 +174,16 @@ internal static class DocxDiffBookmarkFixtures
                 RefPara("_Ref_Sec21"),
                 b => Edit(b, "See ", "See, per the recitals, ")),
 
+            // 16. A heading carrying a bookmark is deleted and the bookmark now sits on the next, unchanged heading
+            //     (sections merged): the deleted paragraph and the equal one both carry the name.
+            ["bookmark-moves-to-equal-para-from-deleted-para"] = (
+                "<w:p><w:bookmarkStart w:id=\"7\" w:name=\"_Ref_Ditches\"/><w:r><w:t>Ditches and canals</w:t></w:r>" +
+                "<w:bookmarkEnd w:id=\"7\"/></w:p>" +
+                "<w:p><w:r><w:t>Upkeep of the screening belt</w:t></w:r></w:p>" +
+                RefPara("_Ref_Ditches"),
+                b => MoveBookmarkInto(DeleteParaContaining(b, "Ditches and canals"), "Upkeep of the screening belt",
+                    "7", "_Ref_Ditches")),
+
             // 14. Bookmark DELETED while a reference SURVIVES (right itself has a dangling ref — we mirror it).
             ["bookmark-deleted-ref-survives"] = (
                 BkPara("7", "_Ref_Sec21", "Section 2.1", " has definitions.") +
@@ -256,6 +266,17 @@ internal static class DocxDiffBookmarkFixtures
             var p = body.Elements<Paragraph>().First(x =>
                 string.Concat(x.Descendants<Text>().Select(t => t.Text)).Contains(contains));
             p.Remove();
+        });
+
+    /// <summary>Wrap the whole content of the paragraph containing <paramref name="contains"/> in a new bookmark.</summary>
+    private static byte[] MoveBookmarkInto(byte[] left, string contains, string id, string name) =>
+        Mutate(left, body =>
+        {
+            var p = body.Elements<Paragraph>().First(x =>
+                string.Concat(x.Descendants<Text>().Select(t => t.Text)).Contains(contains));
+            var first = p.Elements<Run>().First();
+            first.InsertBeforeSelf(new BookmarkStart { Id = id, Name = name });
+            p.Elements<Run>().Last().InsertAfterSelf(new BookmarkEnd { Id = id });
         });
 
     private static byte[] Mutate(byte[] left, Action<Body> mutate)

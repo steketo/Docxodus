@@ -4748,9 +4748,11 @@ internal static partial class IrMarkupRenderer
     /// <item><b>Touches an equal region</b> (a bare endpoint exists): the bookmark is unchanged across the
     /// edit, so collapse it to a SINGLE bare start+end (lift any tracked copy out of its <c>w:ins</c>/
     /// <c>w:del</c> wrapper). It then survives BOTH accept and reject, wrapping the surviving content.</item>
-    /// <item><b>Wholly inside a rewritten / whole-block-bailed span</b> (no bare endpoint): keep BOTH tracked
-    /// copies but renumber them to unique ids. Accept drops the <c>w:del</c> copy and keeps the <c>w:ins</c>
-    /// one; reject the reverse — each resolution lands exactly one, paired, name-preserved bookmark.</item>
+    /// <item><b>Wholly inside a rewritten / whole-block-bailed span</b> (no bare endpoint): a span rewritten in
+    /// place keeps BOTH tracked copies, renumbered to unique ids — accept drops the <c>w:del</c> copy and keeps the
+    /// <c>w:ins</c> one, reject the reverse. A whole-block-bailed paragraph keeps only the inserted copy, as Word
+    /// does: one name on two bookmarkStarts leaves Word's REF fields unresolved after Accept All
+    /// (<see cref="CollapseWholeBlockBookmark"/>).</item>
     /// </list>
     /// Either way the Compare output carries unique, 1:1-paired bookmarks with names intact, so every
     /// <c>REF</c>/<c>PAGEREF</c>/<c>NOTEREF</c>/<c>HYPERLINK \l</c> field and internal hyperlink anchor still
@@ -4785,8 +4787,7 @@ internal static partial class IrMarkupRenderer
         // around it moved), so it should be a single BARE pair that survives accept AND reject — collapsing the
         // del/ins copies (or recovering a side the dense-layout renderer dropped, which would otherwise leave the
         // bookmark surviving only one resolution). EXCEPTION: a whole-block-bailed paragraph (its paragraph mark
-        // is itself tracked) cannot host a bare marker that survives both — there the del copy + ins copy each
-        // survive their own resolution, so keep both and let (B) renumber them unique. A genuinely inserted /
+        // is itself tracked) keeps its inserted copy only, see CollapseWholeBlockBookmark. A genuinely inserted /
         // deleted bookmark (one source only) keeps its w:ins/w:del context untouched.
         foreach (var grp in starts.Where(s => (string?)s.Attribute(W.name) != null)
                      .GroupBy(s => (string)s.Attribute(W.name)!).ToList())
@@ -4800,7 +4801,15 @@ internal static partial class IrMarkupRenderer
             if (!common)
                 continue; // inserted/deleted: leave revision context; (B)/(C) keep ids unique + paired
             if (nameStarts.Concat(nameEnds).Any(IsInWholeBlockRevisedParagraph))
-                continue; // whole-block: del + ins copies each carry the name into their own resolution
+            {
+                // Whole-block: the deleted paragraph carries a copy, and the inserted or an equal paragraph another.
+                // Two bookmarkStarts with one name are not a Word document: Word keeps one per name, and after
+                // Accept All the REF fields to it stop resolving. Keep the revised document's copy only, as Word's
+                // own compare does.
+                if (CollapseWholeBlockBookmark(nameStarts, ends))
+                    changed = true;
+                continue;
+            }
             if (nameStarts.Concat(nameEnds).Any(IsBlockLevelRevisionMarker))
                 continue; // a copy per side between blocks: the block placement found no boundary both share
 
@@ -4880,6 +4889,54 @@ internal static partial class IrMarkupRenderer
 
         if (changed)
             main.PutXDocument();
+    }
+
+    /// <summary>Drop the deleted copies of a common bookmark next to its inserted copy, when a whole-block revision
+    /// emitted both: each start tracked on the delete side goes, with its own end (the first end with its id that
+    /// follows it, if tracked on the same side: before (B) the two sources' ids can coincide, so an id alone does not
+    /// tell one bookmark's end from another's). The copy kept is the first insert-side start (in a <c>w:ins</c>/
+    /// <c>w:moveTo</c> or an inserted paragraph), or else the first bare one (an equal paragraph that took the
+    /// bookmark). An insert-side start and its end, when they sit in a paragraph, are lifted out of their revision
+    /// wrapper, so the name survives both accept and reject; a start between blocks stays tracked and the name
+    /// survives accept only.
+    /// Insert-side copies only are left alone: a name the revised document itself repeats stays repeated.
+    /// Returns true if the markup changed.</summary>
+    private static bool CollapseWholeBlockBookmark(List<XElement> nameStarts, List<XElement> runLevelEnds)
+    {
+        static string? IdOf(XElement e) => (string?)e.Attribute(W.id);
+        XElement? EndOf(XElement start) =>
+            runLevelEnds.FirstOrDefault(e => e.Parent != null && IdOf(e) == IdOf(start) && e.IsAfter(start));
+        var keepStart = nameStarts.FirstOrDefault(IsInsertSideMarker)
+            ?? nameStarts.FirstOrDefault(s => !IsTrackedBookmarkMarker(s));
+        var deleted = nameStarts.Where(s => !IsInsertSideMarker(s) && IsTrackedBookmarkMarker(s)).ToList();
+        if (keepStart == null || deleted.Count == 0)
+            return false;
+        var keepEnd = EndOf(keepStart);
+        foreach (var s in deleted)
+        {
+            if (EndOf(s) is { } end && !ReferenceEquals(end, keepEnd) && IsTrackedBookmarkMarker(end)
+                && !IsInsertSideMarker(end))
+                RemoveBookmarkMarker(end);
+            RemoveBookmarkMarker(s);
+        }
+        // A copy between blocks stays tracked: bare, reject would keep it at a boundary the original lacks.
+        if (keepStart.Ancestors(W.p).Any())
+        {
+            LiftBookmarkBare(keepStart);
+            if (keepEnd != null && keepEnd.Ancestors(W.p).Any()) LiftBookmarkBare(keepEnd);
+        }
+        return true;
+    }
+
+    /// <summary>True iff the marker belongs to the revised document's side of the redline: it sits in a
+    /// <c>w:ins</c>/<c>w:moveTo</c> wrapper within its paragraph, or in a paragraph whose mark is inserted.</summary>
+    private static bool IsInsertSideMarker(XElement marker)
+    {
+        if (marker.Ancestors().TakeWhile(a => a.Name != W.p && a.Name != W.body && a.Name != W.tc)
+            .Any(a => a.Name == W.ins || a.Name == W.moveTo))
+            return true;
+        var p = marker.Ancestors(W.p).FirstOrDefault();
+        return p?.Element(W.pPr)?.Element(W.rPr)?.Element(W.ins) != null;
     }
 
     /// <summary>The set of body bookmark NAMES in a source IR document — scanned from each block's provenance
