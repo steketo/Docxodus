@@ -413,6 +413,99 @@ public class DocxDiffRenumberedCaptionBookmarkTests
         AssertPassLeavesAlone(Whole("del", "X", 1, "Figure 7", ": Old A") + inserted, new[] { "X" }, new[] { "X", "N" });
     }
 
+    /// <summary>Word's hidden bookmarks (a <c>_Hlk</c> left by a copy, the <c>_GoBack</c> of the last edit) sit in
+    /// the captions outside the label no field cites: they do not keep the caption out of the rewrite, and both views
+    /// still give their document's paragraphs with the moved bookmark on its label.</summary>
+    [Theory]
+    [InlineData("_Hlk in the original's legend text")]
+    [InlineData("_GoBack before the revised label")]
+    public void Compare_HiddenBookmarkOutsideTheLabel_StillMovesTheBookmark(string place)
+    {
+        const string bookmark = "_Ref_fig_legend";
+        var legend = Caption("24", Legend, bookmark);
+        var details = Caption("24", Details, bookmark);
+        if (place.StartsWith("_Hlk", StringComparison.Ordinal))
+            legend = legend.Replace(R(Legend), R(": Legend of the ") + "<w:bookmarkStart w:id=\"40\" w:name=\"_Hlk212345678\"/>" +
+                                    R("general") + "<w:bookmarkEnd w:id=\"40\"/>" + R(" site plans"), StringComparison.Ordinal);
+        else
+            details = details.Replace("<w:p>", "<w:p><w:bookmarkStart w:id=\"40\" w:name=\"_GoBack\"/><w:bookmarkEnd w:id=\"40\"/>",
+                                      StringComparison.Ordinal);
+        var original = IrTestDocuments.FromBodyXml(Intro + legend + Caption("25", Details) + Caption("26", Rows) + References(bookmark));
+        var revised = IrTestDocuments.FromBodyXml(Intro + details + Caption("25", Rows) + References(bookmark));
+
+        var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
+
+        var failures = new List<string>();
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), new[] { bookmark });
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), new[] { bookmark });
+        CheckIdsAndSchema(failures, redline, original, revised);
+        Assert.True(failures.Count == 0, $"[{place}]\n" + string.Join("\n", failures));
+    }
+
+    /// <summary>A hidden-looking bookmark that a field cites is a cross-reference target like any other: it keeps the
+    /// pair out of the rewrite.</summary>
+    [Fact]
+    public void Pass_CitedUnderscoreBookmarkInTheDeletedCaption_LeavesThePairAlone()
+    {
+        var deleted = Whole("del", "X", 1, "Figure 7", ": Old A")
+            .Replace("</w:p>", "<w:bookmarkStart w:id=\"8\" w:name=\"_Hlk1\"/><w:bookmarkEnd w:id=\"8\"/></w:p>", StringComparison.Ordinal);
+        AssertPassLeavesAlone(
+            deleted + Whole("ins", "X", 2, "Figure 7", ": New A") +
+            "<w:p><w:r><w:instrText xml:space=\"preserve\"> REF _Hlk1 \\h </w:instrText></w:r></w:p>",
+            new[] { "X", "_Hlk1" }, new[] { "X" });
+    }
+
+    /// <summary>An uncited hidden bookmark inside the deleted label would be carried into the accepted document with
+    /// the label: it keeps the pair out like any other bookmark.</summary>
+    [Fact]
+    public void Pass_HiddenBookmarkInsideTheDeletedLabel_LeavesThePairAlone()
+    {
+        var deleted = Whole("del", "X", 1, "Figure 7", ": Old A")
+            .Replace("<w:bookmarkEnd w:id=\"1\"/>", "<w:bookmarkStart w:id=\"8\" w:name=\"_Hlk2\"/><w:bookmarkEnd w:id=\"8\"/><w:bookmarkEnd w:id=\"1\"/>",
+                     StringComparison.Ordinal);
+        AssertPassLeavesAlone(deleted + Whole("ins", "X", 2, "Figure 7", ": New A"), new[] { "X", "_Hlk2" }, new[] { "X" });
+    }
+
+    /// <summary>Captions only, renumbered in cascade, and the original's next caption carries its own bookmark on its
+    /// label, which the revision keeps on the renumbered caption beside the moved one. That bookmark sits in the
+    /// revised caption before the moved copy's end, so the pair keeps the earlier handling (14.1.0.2): accepting is
+    /// right for every name and rejecting gives back the original's paragraphs, but on reject both bookmarks are
+    /// left around no text, which Word drops. Recorded here so that a change of this outcome is seen.</summary>
+    [Fact]
+    public void Compare_CaptionsOnlyInCascade_NextCaptionWithItsOwnBookmark_KeepsTheEarlierHandling()
+    {
+        var names = new[] { "_Ref_fig_legend", "_Ref_fig_details" };
+        var original = IrTestDocuments.FromBodyXml(Intro + Caption("24", Legend, names[0]) + Caption("25", Details, names[1]) +
+                                                   Caption("26", Rows) + References(names));
+        var revised = IrTestDocuments.FromBodyXml(Intro + Caption("24", Details, names) + Caption("25", Rows) + References(names));
+
+        var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
+
+        var failures = new List<string>();
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), names);
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), Array.Empty<string>());
+        foreach (var name in names)
+            if (Enclosed(DocxDiffOps.RejectRevisions(redline), name).Text.Length != 0)
+                failures.Add($"reject: {name} encloses text: the outcome changed, update this test");
+        CheckIdsAndSchema(failures, redline, original, revised);
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
+    /// <summary>The whole-inserted paragraph between the two closes a range opened earlier and opens another with the
+    /// same id (before step (B) the two sources' ids can coincide): its starts and ends do not pair inside it, so it
+    /// is not moved and the pair is left alone.</summary>
+    [Fact]
+    public void Pass_InsertedParagraphBetweenClosesOneRangeAndOpensAnotherWithTheSameId_LeavesThePairAlone()
+    {
+        var inserted = "<w:p>" + Mark("ins") + "<w:bookmarkEnd w:id=\"5\"/>" + Tracked("ins", "Inserted note") +
+                       "<w:bookmarkStart w:id=\"5\" w:name=\"Z2\"/></w:p>";
+        AssertPassLeavesAlone(
+            "<w:p><w:bookmarkStart w:id=\"5\" w:name=\"Z1\"/><w:r><w:t>Head</w:t></w:r></w:p>" +
+            Whole("del", "X", 1, "Figure 7", ": Old A") + inserted + Whole("ins", "X", 2, "Figure 7", ": New A") +
+            "<w:p><w:r><w:t>Tail</w:t></w:r><w:bookmarkEnd w:id=\"5\"/></w:p>",
+            new[] { "X", "Z1" }, new[] { "X", "Z2" });
+    }
+
     // ---- observers -------------------------------------------------------------------------------
 
     private static XElement Body(byte[] bytes)

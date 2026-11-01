@@ -4938,6 +4938,7 @@ internal static partial class IrMarkupRenderer
         Func<int> nextId)
     {
         var candidates = new List<CommonTextCandidate>();
+        var cited = CitedBookmarkNames(starts.FirstOrDefault()?.AncestorsAndSelf().Last());
         foreach (var grp in starts.Where(s => (string?)s.Attribute(W.name) != null)
                      .GroupBy(s => (string)s.Attribute(W.name)!))
         {
@@ -4968,7 +4969,7 @@ internal static partial class IrMarkupRenderer
                 || touched.Contains(first.DelParagraph) || touched.Contains(first.NewParagraph))
                 continue;
             var own = new HashSet<XElement>(members.SelectMany(m => new[] { m!.DelStart, m.DelEnd, m.KeepStart, m.KeepEnd }));
-            if (HasForeignRangeMarker(first, own))
+            if (HasForeignRangeMarker(first, own, cited))
                 continue;
             touched.Add(first.DelParagraph);
             touched.Add(first.NewParagraph);
@@ -5051,16 +5052,53 @@ internal static partial class IrMarkupRenderer
     /// <summary>True iff a range marker other than the group's own would end up around rewritten text: any bookmark
     /// marker in the deleted paragraph (its text becomes unchanged), any bookmark marker in the revised paragraph
     /// before the copy's end (that text becomes deleted), or a comment or permission range marker inside either
-    /// copy.</summary>
-    private static bool HasForeignRangeMarker(CommonTextCandidate c, HashSet<XElement> own)
+    /// copy. Word's hidden bookmarks (a name starting with <c>_</c>, such as <c>_GoBack</c> or <c>_Hlk…</c>) that no
+    /// field or hyperlink cites do not count when they sit outside both copies: nothing reads where they end up.</summary>
+    private static bool HasForeignRangeMarker(CommonTextCandidate c, HashSet<XElement> own, HashSet<string> cited)
     {
         static bool IsBookmarkMarker(XElement e) => e.Name == W.bookmarkStart || e.Name == W.bookmarkEnd;
         static bool IsOtherRangeMarker(XElement e) =>
             e.Name == W.commentRangeStart || e.Name == W.commentRangeEnd || e.Name == W.permStart || e.Name == W.permEnd;
-        return c.DelParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e))
-            || c.NewParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e) && e.IsBefore(c.KeepEnd))
+        static bool Inside(XElement e, XElement start, XElement end) => e.IsAfter(start) && e.IsBefore(end);
+        bool Ignorable(XElement e, XElement start, XElement end)
+        {
+            var named = e.Name == W.bookmarkStart
+                ? e
+                : e.Ancestors().Last().Descendants(W.bookmarkStart).LastOrDefault(b =>
+                    (string?)b.Attribute(W.id) == (string?)e.Attribute(W.id) && b.IsBefore(e));
+            var name = (string?)named?.Attribute(W.name);
+            return name != null && name.StartsWith("_", StringComparison.Ordinal) && !cited.Contains(name)
+                && !Inside(e, start, end);
+        }
+        return c.DelParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e)
+                                                     && !Ignorable(e, c.DelStart, c.DelEnd))
+            || c.NewParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e) && e.IsBefore(c.KeepEnd)
+                                                     && !Ignorable(e, c.KeepStart, c.KeepEnd))
             || c.DelParagraph.Descendants().Any(e => IsOtherRangeMarker(e) && e.IsAfter(c.DelStart) && e.IsBefore(c.DelEnd))
             || c.NewParagraph.Descendants().Any(e => IsOtherRangeMarker(e) && e.IsAfter(c.KeepStart) && e.IsBefore(c.KeepEnd));
+    }
+
+    /// <summary>The bookmark names a REF, PAGEREF or NOTEREF field, a HYPERLINK \\l field or an internal hyperlink
+    /// cites anywhere in the redline (both documents' fields are in it, the deleted ones as <c>w:delInstrText</c>).
+    /// A field's instruction can be split across runs, so each paragraph's instruction text is read as one.</summary>
+    private static HashSet<string> CitedBookmarkNames(XElement? root)
+    {
+        var cited = new HashSet<string>(StringComparer.Ordinal);
+        if (root == null)
+            return cited;
+        var instructions = root.Descendants(W.p).Select(p => string.Concat(p.Descendants()
+                .Where(e => e.Name == W.instrText || e.Name == W.delInstrText).Select(e => e.Value)))
+            .Concat(root.Descendants(W.fldSimple).Select(f => (string?)f.Attribute(W.instr) ?? ""));
+        var reference = new System.Text.RegularExpressions.Regex(
+            "(?:\\b(?:PAGEREF|NOTEREF|REF)\\s+|\\\\l\\s+)\"?([^\\s\"\\\\]+)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        foreach (var instruction in instructions)
+            foreach (System.Text.RegularExpressions.Match m in reference.Matches(instruction))
+                cited.Add(m.Groups[1].Value);
+        foreach (var h in root.Descendants(W.hyperlink))
+            if ((string?)h.Attribute(W.anchor) is { } anchor)
+                cited.Add(anchor);
+        return cited;
     }
 
     private sealed record CommonTextCandidate(
@@ -5222,9 +5260,18 @@ internal static partial class IrMarkupRenderer
                      (W.bookmarkStart, W.bookmarkEnd), (W.commentRangeStart, W.commentRangeEnd), (W.permStart, W.permEnd),
                  })
         {
-            var opened = paragraph.Descendants(open).Select(e => (string?)e.Attribute(W.id)).ToHashSet();
-            var closed = paragraph.Descendants(close).Select(e => (string?)e.Attribute(W.id)).ToHashSet();
-            if (!opened.SetEquals(closed))
+            // Paired by order inside the paragraph, not as sets of ids: before step (B) the two sources' ids can
+            // coincide, so an end can close a range opened elsewhere while a start with its id opens another.
+            var pending = new List<string?>();
+            foreach (var e in paragraph.Descendants().Where(e => e.Name == open || e.Name == close))
+            {
+                var id = (string?)e.Attribute(W.id);
+                if (e.Name == open)
+                    pending.Add(id);
+                else if (!pending.Remove(id))
+                    return true;
+            }
+            if (pending.Count > 0)
                 return true;
         }
         return false;
