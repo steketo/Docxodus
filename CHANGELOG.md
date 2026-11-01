@@ -27,8 +27,11 @@ All notable changes to this project will be documented in this file.
   bookmark on it, and the revision's label and number are deleted from the caption that follows: accepting joins
   the two paragraphs into the revised caption, rejecting gives back both original captions. Whole-inserted
   paragraphs between the two are moved out of the way, which changes neither view. This applies only when the two
-  copies enclose the same text, fields and run formatting and the two paragraphs have the same properties;
-  otherwise the earlier handling stays.
+  copies enclose the same text, fields and run formatting, the two paragraphs have the same properties, and no
+  other bookmark sits in the deleted paragraph or in the revised one before the copy's end (a second bookmark on
+  the label, or one on the whole caption, would otherwise lose text on accept); each pair is checked again on the
+  markup the earlier pairs left, and a paragraph holding one end of a range that continues elsewhere is not
+  moved. Otherwise the earlier handling stays.
 
 ## [14.1.0] - 2026-10-21
 

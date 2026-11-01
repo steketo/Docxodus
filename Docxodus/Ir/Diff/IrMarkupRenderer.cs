@@ -4911,22 +4911,32 @@ internal static partial class IrMarkupRenderer
     /// original paragraphs, and accepting removes the deleted mark, so the kept text joins the start of the next
     /// paragraph that survives and reads as the revision did. This does the same, with the bookmark on the kept
     /// text.</para>
-    /// <para>Conditions, each checked before anything changes: the name is common and has two copies, one in a
-    /// paragraph whose mark is deleted (the deleted paragraph) and one in another paragraph of the same container
+    /// <para>Conditions (<see cref="TryBuildCommonTextCandidate"/>): the name is common and has two copies, one in
+    /// a paragraph whose mark is deleted (the deleted paragraph) and one in another paragraph of the same container
     /// (the revised paragraph); the deleted copy encloses only deleted runs and the deleted paragraph has no other
     /// text that accepting keeps; the revised copy opens the text accepting keeps in its paragraph; the two
-    /// enclosed texts, field codes included, are equal and every field they hold is whole. Between the two
-    /// paragraphs only whole-deleted paragraphs may remain: whole-inserted ones in between are moved out, which
-    /// changes neither resolution, and a revised paragraph that comes first must itself be whole-inserted. Names
-    /// whose copies enclose the same runs (two bookmarks on one caption) move together.</para>
+    /// enclosed texts, field codes and run properties included, are equal and every field they hold is whole; the
+    /// two paragraphs have equal properties. Between the two paragraphs only whole-deleted paragraphs may remain:
+    /// whole-inserted ones in between are moved out, which changes neither resolution, and a revised paragraph
+    /// that comes first must itself be whole-inserted. Names whose copies enclose the same runs (two bookmarks on
+    /// one caption) move together; any other range marker in the deleted paragraph, or in the revised one before
+    /// the copy's end, keeps the pair out (the rewrite would leave it around deleted text). Each group is checked
+    /// again on the markup the earlier groups left, right before it is rewritten: a rewrite moves paragraphs and
+    /// turns deleted text into unchanged text.</para>
     /// Returns true if the markup changed.
     /// </summary>
     private static bool CarryBookmarksOntoCommonText(
         List<XElement> starts, List<XElement> ends, HashSet<string> leftNames, HashSet<string> rightNames,
-        RenderState state)
-    {
-        static string? IdOf(XElement e) => (string?)e.Attribute(W.id);
+        RenderState state) =>
+        CarryBookmarksOntoCommonText(starts, ends, leftNames, rightNames, state.NextId);
 
+    /// <summary>The pass over the given run-level bookmark markers; <paramref name="nextId"/> numbers the revision
+    /// wrappers it adds, which take author and date from the revision they split or from the deleted paragraph's
+    /// mark. Internal for the tests on hand-written redlines.</summary>
+    internal static bool CarryBookmarksOntoCommonText(
+        List<XElement> starts, List<XElement> ends, HashSet<string> leftNames, HashSet<string> rightNames,
+        Func<int> nextId)
+    {
         var candidates = new List<CommonTextCandidate>();
         foreach (var grp in starts.Where(s => (string?)s.Attribute(W.name) != null)
                      .GroupBy(s => (string)s.Attribute(W.name)!))
@@ -4938,69 +4948,42 @@ internal static partial class IrMarkupRenderer
                 continue;
             var delStart = copies.FirstOrDefault(s => s.Ancestors(W.p).FirstOrDefault() is { } p && HasDeletedMark(p));
             var keepStart = copies.FirstOrDefault(s => !ReferenceEquals(s, delStart));
-            if (delStart == null || keepStart == null)
-                continue;
-            var delEnd = ends.FirstOrDefault(e => IdOf(e) == IdOf(delStart) && e.IsAfter(delStart));
-            var keepEnd = ends.FirstOrDefault(e => IdOf(e) == IdOf(keepStart) && e.IsAfter(keepStart));
-            if (delEnd == null || keepEnd == null)
-                continue;
-            var pDel = delStart.Ancestors(W.p).First();
-            var pNew = keepStart.Ancestors(W.p).FirstOrDefault();
-            if (pNew == null || ReferenceEquals(pNew, pDel) || HasDeletedMark(pNew) || pNew.Parent != pDel.Parent
-                || pDel.Parent == null
-                || !ReferenceEquals(delEnd.Ancestors(W.p).FirstOrDefault(), pDel)
-                || !ReferenceEquals(keepEnd.Ancestors(W.p).FirstOrDefault(), pNew)
-                || !IsLiftableMarker(delStart, pDel) || !IsLiftableMarker(delEnd, pDel)
-                || !IsLiftableMarker(keepStart, pNew) || !IsLiftableMarker(keepEnd, pNew))
-                continue;
-            var delRuns = RunLevelRunsBetween(pDel, delStart, delEnd);
-            var keepRuns = RunLevelRunsBetween(pNew, keepStart, keepEnd);
-            if (delRuns == null || keepRuns == null || delRuns.Count == 0
-                || !delRuns.All(r => r.Parent!.Name == W.del))
-                continue;
-            var text = EnclosedSignature(delRuns);
-            if (text == null || text.Length == 0
-                || text != EnclosedSignature(keepRuns.Where(r => r.Parent!.Name != W.del).ToList()))
-                continue;
-            // Accepting keeps nothing else of the deleted paragraph, and nothing of the revised one before the copy.
-            if (pDel.Descendants(W.r).Any(r => !delRuns.Contains(r) && !IsUnderRevision(r, pDel, W.del))
-                || pNew.Descendants(W.r).Any(r => r.IsBefore(keepStart) && !IsUnderRevision(r, pNew, W.del)))
-                continue;
-            // Accepting joins the two paragraphs, and the joined paragraph keeps one paragraph's properties: only
-            // paragraphs whose properties are equal are joined, so either choice gives the revision's.
-            var delProperties = CanonicalProperties(pDel.Element(W.pPr), W.pPrChange);
-            if (delProperties == null || delProperties != CanonicalProperties(pNew.Element(W.pPr), W.pPrChange)
-                || pDel.Element(W.pPr)?.Element(W.sectPr) != null || pNew.Element(W.pPr)?.Element(W.sectPr) != null)
-                continue;
-            if (!CanPlaceBefore(pDel, pNew))
-                continue;
-            candidates.Add(new CommonTextCandidate(delStart, delEnd, keepStart, keepEnd, pDel, pNew, delRuns, keepRuns));
+            if (delStart != null && keepStart != null
+                && TryBuildCommonTextCandidate(delStart, keepStart, ends) is { } candidate)
+                candidates.Add(candidate);
         }
         if (candidates.Count == 0)
             return false;
 
-        // One rewrite per pair of paragraphs: a second group there (a bookmark nested in another) would find its runs
-        // already rewritten, so it keeps the ordinary collapse of step (A).
         var touched = new HashSet<XElement>();
         bool changed = false;
-        foreach (var group in candidates.GroupBy(c => (c.DelRuns[0], c.DelRuns[^1], c.KeepRuns[0], c.KeepRuns[^1])))
+        foreach (var group in candidates.GroupBy(c => (c.DelRuns[0], c.DelRuns[^1], c.KeepRuns[0], c.KeepRuns[^1])).ToList())
         {
-            var first = group.First();
-            if (touched.Contains(first.DelParagraph) || touched.Contains(first.NewParagraph))
+            // Checked again here: an earlier group may have moved these paragraphs or made text in them unchanged.
+            var members = group.Select(c => TryBuildCommonTextCandidate(c.DelStart, c.KeepStart, ends)).ToList();
+            if (members.Any(m => m == null))
+                continue;
+            var first = members[0]!;
+            if (members.Any(m => !m!.DelRuns.SequenceEqual(first.DelRuns) || !m.KeepRuns.SequenceEqual(first.KeepRuns))
+                || touched.Contains(first.DelParagraph) || touched.Contains(first.NewParagraph))
+                continue;
+            var own = new HashSet<XElement>(members.SelectMany(m => new[] { m!.DelStart, m.DelEnd, m.KeepStart, m.KeepEnd }));
+            if (HasForeignRangeMarker(first, own))
                 continue;
             touched.Add(first.DelParagraph);
             touched.Add(first.NewParagraph);
             changed = true;
             PlaceBefore(first.DelParagraph, first.NewParagraph);
-            foreach (var c in group)
+            foreach (var c in members)
             {
-                RemoveBookmarkMarker(c.KeepStart);
+                RemoveBookmarkMarker(c!.KeepStart);
                 RemoveBookmarkMarker(c.KeepEnd);
                 LiftBookmarkBare(c.DelStart);
                 LiftBookmarkBare(c.DelEnd);
             }
+            var deletedMark = first.DelParagraph.Element(W.pPr)!.Element(W.rPr)!.Element(W.del)!;
             foreach (var run in first.DelRuns)
-                UnwrapDeletedRun(run, state);
+                UnwrapDeletedRun(run, nextId);
             foreach (var run in first.KeepRuns)
             {
                 var wrapper = run.Parent!;
@@ -5013,11 +4996,71 @@ internal static partial class IrMarkupRenderer
                 else if (wrapper.Name != W.del)
                 {
                     RenameRunText(run, toDeleted: true);
-                    WrapMarkerInRevision(run, RevKind.Del, state);
+                    run.ReplaceWith(new XElement(W.del, RevisionAttributesLike(deletedMark, nextId), run));
                 }
             }
         }
         return changed;
+    }
+
+    /// <summary>The pair of copies of one bookmark name as a rewrite candidate, read from the markup as it is now, or
+    /// null when a condition of <see cref="CarryBookmarksOntoCommonText(List{XElement}, List{XElement}, HashSet{string},
+    /// HashSet{string}, RenderState)"/> fails. Each end is the first end with the start's id after it in the start's
+    /// own paragraph: before step (B) the two sources' ids can coincide.</summary>
+    private static CommonTextCandidate? TryBuildCommonTextCandidate(XElement delStart, XElement keepStart, List<XElement> ends)
+    {
+        if (delStart.Parent == null || keepStart.Parent == null)
+            return null;
+        var pDel = delStart.Ancestors(W.p).FirstOrDefault();
+        var pNew = keepStart.Ancestors(W.p).FirstOrDefault();
+        if (pDel == null || pNew == null || !HasDeletedMark(pDel) || ReferenceEquals(pNew, pDel) || HasDeletedMark(pNew)
+            || pDel.Parent == null || pNew.Parent != pDel.Parent)
+            return null;
+        XElement? EndOf(XElement start, XElement paragraph) => ends.FirstOrDefault(e =>
+            e.Parent != null && (string?)e.Attribute(W.id) == (string?)start.Attribute(W.id) && e.IsAfter(start)
+            && ReferenceEquals(e.Ancestors(W.p).FirstOrDefault(), paragraph));
+        var delEnd = EndOf(delStart, pDel);
+        var keepEnd = EndOf(keepStart, pNew);
+        if (delEnd == null || keepEnd == null
+            || !IsLiftableMarker(delStart, pDel) || !IsLiftableMarker(delEnd, pDel)
+            || !IsLiftableMarker(keepStart, pNew) || !IsLiftableMarker(keepEnd, pNew))
+            return null;
+        var delRuns = RunLevelRunsBetween(pDel, delStart, delEnd);
+        var keepRuns = RunLevelRunsBetween(pNew, keepStart, keepEnd);
+        if (delRuns == null || keepRuns == null || delRuns.Count == 0 || !delRuns.All(r => r.Parent!.Name == W.del))
+            return null;
+        var text = EnclosedSignature(delRuns);
+        if (text == null || text.Length == 0
+            || text != EnclosedSignature(keepRuns.Where(r => r.Parent!.Name != W.del).ToList()))
+            return null;
+        // Accepting keeps nothing else of the deleted paragraph, and nothing of the revised one before the copy.
+        if (pDel.Descendants(W.r).Any(r => !delRuns.Contains(r) && !IsUnderRevision(r, pDel, W.del))
+            || pNew.Descendants(W.r).Any(r => r.IsBefore(keepStart) && !IsUnderRevision(r, pNew, W.del)))
+            return null;
+        // Accepting joins the two paragraphs, and the joined paragraph keeps one paragraph's properties: only
+        // paragraphs whose properties are equal are joined, so either choice gives the revision's.
+        var delProperties = CanonicalProperties(pDel.Element(W.pPr), W.pPrChange);
+        if (delProperties == null || delProperties != CanonicalProperties(pNew.Element(W.pPr), W.pPrChange)
+            || pDel.Element(W.pPr)?.Element(W.sectPr) != null || pNew.Element(W.pPr)?.Element(W.sectPr) != null)
+            return null;
+        if (!CanPlaceBefore(pDel, pNew))
+            return null;
+        return new CommonTextCandidate(delStart, delEnd, keepStart, keepEnd, pDel, pNew, delRuns, keepRuns);
+    }
+
+    /// <summary>True iff a range marker other than the group's own would end up around rewritten text: any bookmark
+    /// marker in the deleted paragraph (its text becomes unchanged), any bookmark marker in the revised paragraph
+    /// before the copy's end (that text becomes deleted), or a comment or permission range marker inside either
+    /// copy.</summary>
+    private static bool HasForeignRangeMarker(CommonTextCandidate c, HashSet<XElement> own)
+    {
+        static bool IsBookmarkMarker(XElement e) => e.Name == W.bookmarkStart || e.Name == W.bookmarkEnd;
+        static bool IsOtherRangeMarker(XElement e) =>
+            e.Name == W.commentRangeStart || e.Name == W.commentRangeEnd || e.Name == W.permStart || e.Name == W.permEnd;
+        return c.DelParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e))
+            || c.NewParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e) && e.IsBefore(c.KeepEnd))
+            || c.DelParagraph.Descendants().Any(e => IsOtherRangeMarker(e) && e.IsAfter(c.DelStart) && e.IsBefore(c.DelEnd))
+            || c.NewParagraph.Descendants().Any(e => IsOtherRangeMarker(e) && e.IsAfter(c.KeepStart) && e.IsBefore(c.KeepEnd));
     }
 
     private sealed record CommonTextCandidate(
@@ -5131,7 +5174,7 @@ internal static partial class IrMarkupRenderer
     private static bool CanPlaceBefore(XElement pDel, XElement pNew)
     {
         bool delFirst = pDel.IsBefore(pNew);
-        if (!delFirst && !IsWholeInsertedParagraph(pNew))
+        if (!delFirst && (!IsWholeInsertedParagraph(pNew) || HasRangeCrossingParagraph(pDel)))
             return false;
         var (from, to) = delFirst ? (pDel, pNew) : (pNew, pDel);
         return from.ElementsAfterSelf().TakeWhile(e => !ReferenceEquals(e, to))
@@ -5164,15 +5207,32 @@ internal static partial class IrMarkupRenderer
 
     private static bool IsWholeDeletedParagraph(XElement e) =>
         e.Name == W.p && HasDeletedMark(e) && e.Element(W.pPr)?.Element(W.sectPr) == null
-        && e.Descendants(W.r).All(r => IsUnderRevision(r, e, W.del));
+        && e.Descendants(W.r).All(r => IsUnderRevision(r, e, W.del)) && !HasRangeCrossingParagraph(e);
 
     private static bool IsWholeInsertedParagraph(XElement e) =>
         e.Name == W.p && HasInsertedMark(e) && e.Element(W.pPr)?.Element(W.sectPr) == null
-        && e.Descendants(W.r).All(r => IsUnderRevision(r, e, W.ins));
+        && e.Descendants(W.r).All(r => IsUnderRevision(r, e, W.ins)) && !HasRangeCrossingParagraph(e);
+
+    /// <summary>True iff the paragraph holds one end of a bookmark, comment or permission range whose other end is in
+    /// another paragraph: moving the paragraph would change what the range spans.</summary>
+    private static bool HasRangeCrossingParagraph(XElement paragraph)
+    {
+        foreach (var (open, close) in new[]
+                 {
+                     (W.bookmarkStart, W.bookmarkEnd), (W.commentRangeStart, W.commentRangeEnd), (W.permStart, W.permEnd),
+                 })
+        {
+            var opened = paragraph.Descendants(open).Select(e => (string?)e.Attribute(W.id)).ToHashSet();
+            var closed = paragraph.Descendants(close).Select(e => (string?)e.Attribute(W.id)).ToHashSet();
+            if (!opened.SetEquals(closed))
+                return true;
+        }
+        return false;
+    }
 
     /// <summary>Take a run out of its <c>w:del</c> as unchanged text: the wrapper's runs before it stay in the
     /// wrapper, the ones after it move into a new deletion right after the run.</summary>
-    private static void UnwrapDeletedRun(XElement run, RenderState state)
+    private static void UnwrapDeletedRun(XElement run, Func<int> nextId)
     {
         var wrapper = run.Parent!;
         var after = run.ElementsAfterSelf().ToList();
@@ -5182,12 +5242,18 @@ internal static partial class IrMarkupRenderer
         {
             foreach (var e in after)
                 e.Remove();
-            run.AddAfterSelf(new XElement(W.del, state.RevisionAttributes(), after));
+            run.AddAfterSelf(new XElement(W.del, RevisionAttributesLike(wrapper, nextId), after));
         }
         if (!wrapper.Elements().Any())
             wrapper.Remove();
         RenameRunText(run, toDeleted: false);
     }
+
+    /// <summary>A new revision's attributes: a fresh id, and the other attributes (author, date) of
+    /// <paramref name="model"/>.</summary>
+    private static object[] RevisionAttributesLike(XElement model, Func<int> nextId) =>
+        new object[] { new XAttribute(W.id, nextId()) }
+            .Concat(model.Attributes().Where(a => a.Name != W.id)).ToArray();
 
     /// <summary>Rename a run's text and instruction elements to their deleted forms, or back.</summary>
     private static void RenameRunText(XElement run, bool toDeleted)

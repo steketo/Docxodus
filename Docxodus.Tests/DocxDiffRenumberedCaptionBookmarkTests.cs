@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Xml.Linq;
+using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using Docxodus.Internal;
 using Docxodus.Tests.Ir;
@@ -48,9 +49,13 @@ public class DocxDiffRenumberedCaptionBookmarkTests
 
     private static string Image(string relId, int id) =>
         "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"100\" cy=\"200\"/>" +
-        $"<wp:docPr id=\"{id}\" name=\"Picture {id}\"/><a:graphic><a:graphicData>" +
+        $"<wp:docPr id=\"{id}\" name=\"Picture {id}\"/>" +
+        "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
         "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
-        $"<pic:blipFill><a:blip r:embed=\"{relId}\"/></pic:blipFill></pic:pic>" +
+        $"<pic:nvPicPr><pic:cNvPr id=\"{id}\" name=\"image{id}.png\"/><pic:cNvPicPr/></pic:nvPicPr>" +
+        $"<pic:blipFill><a:blip r:embed=\"{relId}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>" +
+        "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"100\" cy=\"200\"/></a:xfrm>" +
+        "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>" +
         "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>";
 
     private static byte[] Png(byte tag) => IrTestDocuments.TinyPng.Concat(new[] { tag }).ToArray();
@@ -114,30 +119,67 @@ public class DocxDiffRenumberedCaptionBookmarkTests
         }
         CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), bookmarks);
         CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), bookmarks);
+        CheckIdsAndSchema(failures, redline, original, revised);
         Assert.True(failures.Count == 0, $"[{shape}]\n" + string.Join("\n", failures));
     }
 
-    /// <summary>A second bookmark nested in the first, on the label only: the caption is rewritten once, for the
-    /// outer bookmark, and the nested one keeps the ordinary handling; both views keep their paragraphs.</summary>
+    /// <summary>Several figures follow the removed one, each renumbered (the real report's shape): the moved
+    /// bookmark lands on the renumbered caption, and the bookmarks of the later captions, which stay where they are,
+    /// keep enclosing their own caption's label and number in both views.</summary>
     [Fact]
-    public void Compare_NestedBookmarkOnARenumberedCaption_RewritesTheCaptionOnce()
+    public void Compare_BookmarksOnCaptionsRenumberedInCascade_EncloseTheSameTextInBothViews()
     {
-        const string outer = "_Ref_fig_legend";
-        static string Nested(string number, string text) =>
-            $"<w:p><w:bookmarkStart w:id=\"10\" w:name=\"{outer}\"/><w:bookmarkStart w:id=\"11\" w:name=\"_Ref_label\"/>" +
-            R("Figure ") + "<w:bookmarkEnd w:id=\"11\"/>" + Field("SEQ Figure \\* ARABIC", number) +
-            "<w:bookmarkEnd w:id=\"10\"/>" + R(text) + "</w:p>";
-        var original = IrTestDocuments.FromBodyXml(Intro + Nested("24", Legend) + Caption("25", Details) +
-                                                   Caption("26", Rows) + References(outer));
-        var revised = IrTestDocuments.FromBodyXml(Intro + Nested("24", Details) + Caption("25", Rows) +
-                                                  References(outer));
+        const string trees = ": Construction details of the hedges along the canal: type D";
+        var names = new[] { "_Ref_fig_legend", "_Ref_fig_rows", "_Ref_fig_hedges" };
+        var original = IrTestDocuments.FromBodyXmlWithImageParts(
+            Intro + Image("rIdA", 1) + Caption("24", Legend, names[0]) + Image("rIdB", 2) + Caption("25", Details) +
+            Image("rIdC", 3) + Caption("26", Rows, names[1]) + Image("rIdD", 4) + Caption("27", trees, names[2]) +
+            References(names),
+            ("rIdA", Png(1)), ("rIdB", Png(2)), ("rIdC", Png(3)), ("rIdD", Png(4)));
+        var revised = IrTestDocuments.FromBodyXmlWithImageParts(
+            Intro + Image("rIdB", 1) + Caption("24", Details, names[0]) + Image("rIdC", 2) +
+            Caption("25", Rows, names[1]) + Image("rIdD", 3) + Caption("26", trees, names[2]) + References(names),
+            ("rIdB", Png(2)), ("rIdC", Png(3)), ("rIdD", Png(4)));
 
         var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
 
         var failures = new List<string>();
-        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), new[] { outer });
-        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), new[] { outer });
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), names);
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), names);
+        CheckIdsAndSchema(failures, redline, original, revised);
         Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
+    /// <summary>A second common bookmark opens where the moved one does and ends elsewhere: on the label only
+    /// (nested), or on the whole caption (Word's own caption bookmarks). Rewriting the caption for the moved
+    /// bookmark would leave the other one around deleted text on accept, so these captions keep the earlier
+    /// handling: accepting puts both bookmarks on the revision's text, and both views keep their paragraphs.</summary>
+    [Theory]
+    [InlineData("label only")]
+    [InlineData("whole caption")]
+    public void Compare_SecondBookmarkFromTheSameStart_KeepsTheEarlierHandling(string second)
+    {
+        const string moved = "_Ref_fig_legend";
+        const string other = "_Ref_other";
+        string Shape(string number, string text) => second == "label only"
+            ? $"<w:p><w:bookmarkStart w:id=\"10\" w:name=\"{moved}\"/><w:bookmarkStart w:id=\"11\" w:name=\"{other}\"/>" +
+              R("Figure ") + "<w:bookmarkEnd w:id=\"11\"/>" + Field("SEQ Figure \\* ARABIC", number) +
+              "<w:bookmarkEnd w:id=\"10\"/>" + R(text) + "</w:p>"
+            : $"<w:p><w:bookmarkStart w:id=\"10\" w:name=\"{moved}\"/><w:bookmarkStart w:id=\"11\" w:name=\"{other}\"/>" +
+              R("Figure ") + Field("SEQ Figure \\* ARABIC", number) + "<w:bookmarkEnd w:id=\"10\"/>" + R(text) +
+              "<w:bookmarkEnd w:id=\"11\"/></w:p>";
+        var original = IrTestDocuments.FromBodyXml(Intro + Shape("24", Legend) + Caption("25", Details) +
+                                                   Caption("26", Rows) + References(moved, other));
+        var revised = IrTestDocuments.FromBodyXml(Intro + Shape("24", Details) + Caption("25", Rows) +
+                                                  References(moved, other));
+
+        var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
+
+        var failures = new List<string>();
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), new[] { moved, other });
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), Array.Empty<string>());
+        CheckIdsAndSchema(failures, redline, original, revised);
+        Assert.True(failures.Count == 0, $"[{second}]\n" + string.Join("\n", failures));
     }
 
     /// <summary>Control: the revision makes the label bold. Accepting keeps the original's "Figure 24" when the two
@@ -198,6 +240,177 @@ public class DocxDiffRenumberedCaptionBookmarkTests
                 failures.Add($"{view}: {name} expected {wantCount}x «{wantText}» in «{wantHost}», " +
                              $"got {gotCount}x «{gotText}» in «{gotHost}»");
         }
+    }
+
+    /// <summary>Revision ids and bookmark ids are unique in the redline, and the redline adds no schema error the
+    /// inputs lack.</summary>
+    private static void CheckIdsAndSchema(List<string> failures, byte[] redline, WmlDocument original, WmlDocument revised)
+    {
+        CheckUniqueIds(failures, Body(redline));
+        var known = PackageValidation.ErrorKeys(original, FileFormatVersions.Office2019, PackageValidation.Keys.IdAtXPathDescription);
+        known.UnionWith(PackageValidation.ErrorKeys(revised, FileFormatVersions.Office2019, PackageValidation.Keys.IdAtXPathDescription));
+        var fresh = PackageValidation.ErrorKeys(redline, FileFormatVersions.Office2019, PackageValidation.Keys.IdAtXPathDescription)
+            .Where(e => !known.Contains(e)).ToList();
+        if (fresh.Count > 0)
+            failures.Add("schema: " + string.Join(" | ", fresh.Take(5)));
+    }
+
+    private static void CheckUniqueIds(List<string> failures, XElement body)
+    {
+        foreach (var kind in new[] { W.ins, W.del, W.bookmarkStart, W.bookmarkEnd })
+        {
+            var repeated = body.Descendants(kind).Select(e => (string?)e.Attribute(W.id)).GroupBy(i => i)
+                .Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+            if (repeated.Count > 0)
+                failures.Add($"{kind.LocalName}: repeated w:id [{string.Join(",", repeated)}]");
+        }
+    }
+
+    // ---- the bookmark pass on hand-written redlines ----------------------------------------------
+
+    private int _revisionId = 100;
+
+    private string Mark(string kind) =>
+        $"<w:pPr><w:rPr><w:{kind} w:id=\"{_revisionId++}\" w:author=\"A\" w:date=\"2026-01-01T00:00:00Z\"/></w:rPr></w:pPr>";
+
+    private string Tracked(string kind, string text) =>
+        $"<w:{kind} w:id=\"{_revisionId++}\" w:author=\"A\" w:date=\"2026-01-01T00:00:00Z\">" +
+        (kind == "del" ? $"<w:r><w:delText xml:space=\"preserve\">{text}</w:delText></w:r>" : R(text)) + $"</w:{kind}>";
+
+    /// <summary>A paragraph inserted or deleted whole: the label, enclosed by the bookmark when one is named, then
+    /// the rest.</summary>
+    private string Whole(string kind, string? bookmark, int bookmarkId, string label, string rest) =>
+        "<w:p>" + Mark(kind) +
+        (bookmark == null ? "" : $"<w:bookmarkStart w:id=\"{bookmarkId}\" w:name=\"{bookmark}\"/>") +
+        Tracked(kind, label) + (bookmark == null ? "" : $"<w:bookmarkEnd w:id=\"{bookmarkId}\"/>") +
+        Tracked(kind, rest) + "</w:p>";
+
+    /// <summary>Run the pass on a hand-written redline body, then compare each view's paragraphs with the expected
+    /// ones, the named bookmarks with their expected paragraph in each view (around some text), and the ids.</summary>
+    private static void AssertPassGives(string body, string[] names, string[] original, string[] revised,
+        (string Name, string Accepted, string Rejected)[] enclosed)
+    {
+        var document = IrTestDocuments.FromBodyXml(body);
+        byte[] bytes;
+        using (var stream = new MemoryStream())
+        {
+            stream.Write(document.DocumentByteArray, 0, document.DocumentByteArray.Length);
+            using (var package = WordprocessingDocument.Open(stream, true))
+            {
+                var main = package.MainDocumentPart!;
+                var root = main.GetXDocument().Root!.Element(W.body)!;
+                int next = 1000;
+                Docxodus.Ir.Diff.IrMarkupRenderer.CarryBookmarksOntoCommonText(
+                    root.Descendants(W.bookmarkStart).ToList(), root.Descendants(W.bookmarkEnd).ToList(),
+                    new HashSet<string>(names), new HashSet<string>(names), () => next++);
+                main.PutXDocument();
+            }
+            bytes = stream.ToArray();
+        }
+
+        var failures = new List<string>();
+        var accepted = DocxDiffOps.AcceptRevisions(bytes);
+        var rejected = DocxDiffOps.RejectRevisions(bytes);
+        if (string.Join("\n", Paragraphs(accepted)) != string.Join("\n", revised))
+            failures.Add("accept:\n" + string.Join("\n", Paragraphs(accepted)));
+        if (string.Join("\n", Paragraphs(rejected)) != string.Join("\n", original))
+            failures.Add("reject:\n" + string.Join("\n", Paragraphs(rejected)));
+        foreach (var (name, acc, rej) in enclosed)
+        {
+            var (_, accText, accHost) = Enclosed(accepted, name);
+            var (_, rejText, rejHost) = Enclosed(rejected, name);
+            if (accHost != acc || rejHost != rej || accText.Length == 0 || rejText.Length == 0)
+                failures.Add($"{name}: accept «{accText}» in «{accHost}», reject «{rejText}» in «{rejHost}»");
+        }
+        CheckUniqueIds(failures, Body(bytes));
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
+    /// <summary>Two bookmarks on equal labels, their paragraphs crossed: inserted A, deleted B, deleted A, inserted
+    /// B. Rewriting A moves both deleted paragraphs before inserted A and makes A's label unchanged, so B's deleted
+    /// paragraph is no longer followed only by whole-deleted ones: B must be checked again on the rewritten markup,
+    /// not on the markup the candidates were found in.</summary>
+    [Fact]
+    public void Pass_CrossedCandidates_InsertedFirst_EachViewKeepsItsParagraphs() =>
+        AssertPassGives(
+            Whole("ins", "X", 2, "Figure 7", ": New A") + Whole("del", "Y", 3, "Figure 7", ": Old B") +
+            Whole("del", "X", 1, "Figure 7", ": Old A") + Whole("ins", "Y", 4, "Figure 7", ": New B"),
+            new[] { "X", "Y" },
+            original: new[] { "Figure 7: Old B", "Figure 7: Old A" },
+            revised: new[] { "Figure 7: New A", "Figure 7: New B" },
+            enclosed: new[] { ("X", "Figure 7: New A", "Figure 7: Old A") });
+
+    /// <summary>Deleted A, deleted B, inserted B, inserted A: rewriting A moves inserted B before deleted A, so for B
+    /// the inserted paragraph now comes first, past a deleted paragraph that is no longer whole-deleted.</summary>
+    [Fact]
+    public void Pass_CrossedCandidates_DeletedFirst_EachViewKeepsItsParagraphs() =>
+        AssertPassGives(
+            Whole("del", "X", 1, "Figure 7", ": Old A") + Whole("del", "Y", 3, "Figure 7", ": Old B") +
+            Whole("ins", "Y", 4, "Figure 7", ": New B") + Whole("ins", "X", 2, "Figure 7", ": New A"),
+            new[] { "X", "Y" },
+            original: new[] { "Figure 7: Old A", "Figure 7: Old B" },
+            revised: new[] { "Figure 7: New B", "Figure 7: New A" },
+            enclosed: new[] { ("X", "Figure 7: New A", "Figure 7: Old A") });
+
+    /// <summary>The deleted paragraph comes first and a whole-inserted paragraph stands between it and the revised
+    /// one: the inserted paragraph moves before the deleted one, so accepting joins the label to the revised
+    /// paragraph and not to the inserted one.</summary>
+    [Fact]
+    public void Pass_DeletedFirstWithAnInsertedParagraphBetween_MovesTheInsertedParagraphOut() =>
+        AssertPassGives(
+            Whole("del", "X", 1, "Figure 7", ": Old A") + Whole("ins", null, 0, "Inserted", " note") +
+            Whole("ins", "X", 2, "Figure 7", ": New A"),
+            new[] { "X" },
+            original: new[] { "Figure 7: Old A" },
+            revised: new[] { "Inserted note", "Figure 7: New A" },
+            enclosed: new[] { ("X", "Figure 7: New A", "Figure 7: Old A") });
+
+    /// <summary>Run the pass on a hand-written redline body and check it leaves the markup as it was.</summary>
+    private static void AssertPassLeavesAlone(string body, string[] leftNames, string[] rightNames)
+    {
+        var root = XElement.Parse($"<w:body xmlns:w=\"{W.w.NamespaceName}\">{body}</w:body>");
+        var before = root.ToString(SaveOptions.DisableFormatting);
+        int next = 1000;
+        bool changed = Docxodus.Ir.Diff.IrMarkupRenderer.CarryBookmarksOntoCommonText(
+            root.Descendants(W.bookmarkStart).ToList(), root.Descendants(W.bookmarkEnd).ToList(),
+            new HashSet<string>(leftNames), new HashSet<string>(rightNames), () => next++);
+        Assert.False(changed);
+        Assert.Equal(before, root.ToString(SaveOptions.DisableFormatting));
+    }
+
+    /// <summary>The whole-inserted paragraph between the two holds the start of a bookmark that ends in a later
+    /// paragraph: moving it would change what that bookmark spans, so the pair is left alone.</summary>
+    [Fact]
+    public void Pass_InsertedParagraphBetweenOpensARangeEndingElsewhere_LeavesThePairAlone()
+    {
+        var inserted = "<w:p>" + Mark("ins") + "<w:bookmarkStart w:id=\"9\" w:name=\"Z\"/>" +
+                       Tracked("ins", "Inserted note") + "</w:p>";
+        AssertPassLeavesAlone(
+            Whole("del", "X", 1, "Figure 7", ": Old A") + inserted + Whole("ins", "X", 2, "Figure 7", ": New A") +
+            "<w:p><w:r><w:t>Tail</w:t></w:r><w:bookmarkEnd w:id=\"9\"/></w:p>",
+            new[] { "X" }, new[] { "X", "Z" });
+    }
+
+    /// <summary>A bookmark only the original has spans the deleted caption, label included: making the label
+    /// unchanged would carry that bookmark's text into the accepted document, so the pair is left alone.</summary>
+    [Fact]
+    public void Pass_OriginalOnlyBookmarkOverTheDeletedLabel_LeavesThePairAlone()
+    {
+        var deleted = Whole("del", "X", 1, "Figure 7", ": Old A")
+            .Replace("<w:bookmarkStart w:id=\"1\"", "<w:bookmarkStart w:id=\"8\" w:name=\"Q\"/><w:bookmarkStart w:id=\"1\"", StringComparison.Ordinal)
+            .Replace("</w:p>", "<w:bookmarkEnd w:id=\"8\"/></w:p>", StringComparison.Ordinal);
+        AssertPassLeavesAlone(deleted + Whole("ins", "X", 2, "Figure 7", ": New A"), new[] { "X", "Q" }, new[] { "X" });
+    }
+
+    /// <summary>A bookmark only the revision has opens with the revised label and spans the whole revised caption:
+    /// deleting that label would leave the bookmark without it on accept, so the pair is left alone.</summary>
+    [Fact]
+    public void Pass_RevisionOnlyBookmarkOverTheRevisedCaption_LeavesThePairAlone()
+    {
+        var inserted = Whole("ins", "X", 2, "Figure 7", ": New A")
+            .Replace("<w:bookmarkStart w:id=\"2\"", "<w:bookmarkStart w:id=\"7\" w:name=\"N\"/><w:bookmarkStart w:id=\"2\"", StringComparison.Ordinal)
+            .Replace("</w:p>", "<w:bookmarkEnd w:id=\"7\"/></w:p>", StringComparison.Ordinal);
+        AssertPassLeavesAlone(Whole("del", "X", 1, "Figure 7", ": Old A") + inserted, new[] { "X" }, new[] { "X", "N" });
     }
 
     // ---- observers -------------------------------------------------------------------------------
