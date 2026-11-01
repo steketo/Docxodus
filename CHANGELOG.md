@@ -19,6 +19,16 @@ All notable changes to this project will be documented in this file.
   Word's own compare does, and an inserted copy is lifted out of its `w:ins`, so the name survives accept and
   reject; a copy between blocks stays tracked, and the name then survives accept only. A name the revised
   document itself repeats is left as it is.
+- Keep a cross-reference bookmark in both views when a figure is removed and the next caption takes its number.
+  The bookmark enclosed "Figure 24" on the original's deleted caption and on the revision's renumbered caption,
+  and only the revision's copy was kept, on inserted text: rejecting the redline in Word removed that text with
+  the bookmark, and its `REF` fields printed "Error! Reference source not found.". As Word's own compare does, the
+  original's "Figure 24" now stays unchanged in the deleted caption, whose paragraph mark stays deleted, with the
+  bookmark on it, and the revision's label and number are deleted from the caption that follows: accepting joins
+  the two paragraphs into the revised caption, rejecting gives back both original captions. Whole-inserted
+  paragraphs between the two are moved out of the way, which changes neither view. This applies only when the two
+  copies enclose the same text, fields and run formatting and the two paragraphs have the same properties;
+  otherwise the earlier handling stays.
 
 ## [14.1.0] - 2026-10-21
 
