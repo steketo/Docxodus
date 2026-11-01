@@ -205,8 +205,8 @@ internal static class IrTableDiffer
     }
 
     /// <summary>
-    /// Cost-fill free rows in one LIS-bounded gap. Direct, unit-span rows use the bounded monotone alignment;
-    /// all other shapes preserve positional pairing. The latter is intentionally retained for table topology
+    /// Cost-fill free rows in one LIS-bounded gap. Direct rows without vertical merges use the bounded
+    /// monotone alignment; all other shapes preserve positional pairing. The latter is intentionally retained for table topology
     /// the renderer cannot reason about from physical-cell order alone.
     /// </summary>
     private static void FillOneRowGap(
@@ -270,8 +270,8 @@ internal static class IrTableDiffer
     }
 
     /// <summary>
-    /// Direct, unit-span rows have a physical-cell order that is safe to align independently of the table
-    /// shell.  The renderer can represent every row-level insert/delete, so unlike cells this alignment may
+    /// Direct rows without vertical merges are safe to align independently of the table shell.
+    /// The renderer can represent every row-level insert/delete, so unlike cells this alignment may
     /// legitimately produce unmatched units on either side.
     /// </summary>
     private static bool TryAlignOrdinaryRowGap(
@@ -324,12 +324,19 @@ internal static class IrTableDiffer
         return true;
     }
 
+    /// <summary>
+    /// A horizontal span and a gridBefore/gridAfter offset stay inside their row, so they do not bar the row
+    /// from the costed fill: excluding them sent a whole gap (a spanned heading or a short row plus every edited
+    /// row beside it) to positional pairing, which rewrites a retained row into an inserted one. A vertical
+    /// merge ties consecutive rows together and keeps the gap positional. Cell pairing inside a spanned or
+    /// offset row stays conservative (<see cref="IsUnitSpanDirectRow"/>).
+    /// </summary>
     private static bool CanUseOrdinaryRowAlignment(IrRow row)
     {
-        if (row.FromTableSdt || row.GridBefore != 0 || row.GridAfter != 0)
+        if (row.FromTableSdt)
             return false;
         foreach (var cell in row.Cells)
-            if (cell.GridSpan != 1 || cell.VMerge != IrVMerge.None || cell.FromRowSdt)
+            if (cell.VMerge != IrVMerge.None || cell.FromRowSdt)
                 return false;
         return true;
     }
@@ -768,7 +775,17 @@ internal static class IrTableDiffer
     /// </summary>
     private static bool CanUseOrdinaryGridAlignment(IrRow left, IrRow right)
     {
-        return CanUseOrdinaryRowAlignment(left) && CanUseOrdinaryRowAlignment(right);
+        return IsUnitSpanDirectRow(left) && IsUnitSpanDirectRow(right);
+    }
+
+    private static bool IsUnitSpanDirectRow(IrRow row)
+    {
+        if (row.GridBefore != 0 || row.GridAfter != 0 || !CanUseOrdinaryRowAlignment(row))
+            return false;
+        foreach (var cell in row.Cells)
+            if (cell.GridSpan != 1)
+                return false;
+        return true;
     }
 
     /// <summary>

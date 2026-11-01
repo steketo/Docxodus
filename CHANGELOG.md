@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Align table rows by content when a row in the changed stretch has a horizontally merged cell (`w:gridSpan`) or
+  leaves grid columns empty (`w:gridBefore`/`w:gridAfter`). One such row, typically a heading spanning the table
+  or a short row that grows to the full grid, sent every changed row beside it to pairing by position: when rows
+  were inserted before edited ones, each edited row was paired with an inserted row and rewritten, and the real
+  edited rows were appended as new rows (on a rotation table that grows from 9 to 13 columns, 65 paragraphs were
+  marked that Word's own compare leaves unmarked; now 24). Horizontal merges and offsets stay inside their row,
+  so these rows now join the costed row alignment; rows in a vertical merge (`w:vMerge`) still pair by position,
+  and cells inside a merged or offset row still pair as before.
 - Keep each field's cached result inside its own field when comparing a paragraph whose cross-references are
   renumbered. The result text of every field was diffed as one text with its neighbours, so a run of `REF`
   fields to consecutive figures shifted by one (Figure 27…33 → 26…32) paired the numbers across field

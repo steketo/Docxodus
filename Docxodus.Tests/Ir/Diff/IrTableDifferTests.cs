@@ -264,6 +264,89 @@ public class IrTableDifferTests
         Assert.Equal(rightTable.Rows[3].Anchor.ToString(), rows[3].RightRowAnchor);
     }
 
+    private static string SpannedCell(string text, int span) =>
+        $"<w:tc><w:tcPr><w:gridSpan w:val=\"{span}\"/></w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>";
+
+    private static string VMergedCell(string? text) =>
+        text is null
+            ? "<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>"
+            : $"<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>";
+
+    [Fact]
+    public void Horizontally_spanned_row_in_the_gap_still_aligns_insert_before_edited_retained_row()
+    {
+        // A heading row whose single cell spans the grid sits in the same free gap as an edited data row
+        // that gains an inserted row before it. A horizontal span ties no row to its neighbours, so the
+        // costed row fill must still run: heading/heading, +X, Beta/Beta-edited. Excluding the whole gap
+        // for one spanned row fell back to positional pairing, which rewrote Beta into X and appended the
+        // edited Beta as a new row (on a real 13-column rotation table, 46 needlessly marked paragraphs).
+        var left = FromXml(GridTable(2000, 2,
+            Row(SpannedCell("Rotation plan heading", 2)),
+            Row(Cell("Beta crop"), Cell("winter wheat after maize")),
+            Row(Cell("C"), Cell("c"))));
+        var right = FromXml(GridTable(2000, 2,
+            Row(SpannedCell("Rotation plan heading revised", 2)),
+            Row(Cell("Xylophone"), Cell("1234")),
+            Row(Cell("Beta crop"), Cell("winter wheat after maize and clover")),
+            Row(Cell("C"), Cell("c"))));
+
+        var op = TableOp(left, right);
+        var leftTable = Assert.IsType<IrTable>(left.Body.Blocks.Single());
+        var rightTable = Assert.IsType<IrTable>(right.Body.Blocks.Single());
+        var rows = op.TableDiff!.RowOps;
+
+        Assert.Equal(
+            new[] { IrRowOpKind.ModifyRow, IrRowOpKind.InsertRow, IrRowOpKind.ModifyRow, IrRowOpKind.EqualRow },
+            rows.Select(r => r.Kind).ToArray());
+        Assert.Equal(rightTable.Rows[1].Anchor.ToString(), rows[1].RightRowAnchor);
+        Assert.Equal(leftTable.Rows[1].Anchor.ToString(), rows[2].LeftRowAnchor);
+        Assert.Equal(rightTable.Rows[2].Anchor.ToString(), rows[2].RightRowAnchor);
+    }
+
+    [Fact]
+    public void Row_with_grid_offset_in_the_gap_still_aligns_insert_before_edited_retained_row()
+    {
+        // gridBefore/gridAfter only leave empty grid columns at the edges of their own row, like a span. A
+        // short base row that grows to the full grid must not send the gap to positional pairing.
+        var left = FromXml(GridTable(2000, 3,
+            "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>" +
+            Cell("Beta crop") + Cell("winter wheat after maize") + "</w:tr>",
+            Row(Cell("C"), Cell("c"), Cell("c3"))));
+        var right = FromXml(GridTable(2000, 3,
+            Row(Cell("Xylophone"), Cell("1234"), Cell("5678")),
+            Row(Cell("Beta crop"), Cell("winter wheat after maize"), Cell("clover")),
+            Row(Cell("C"), Cell("c"), Cell("c3"))));
+
+        var op = TableOp(left, right);
+        var leftTable = Assert.IsType<IrTable>(left.Body.Blocks.Single());
+        Assert.Equal(1, leftTable.Rows[0].GridAfter);
+        Assert.Equal(
+            new[] { IrRowOpKind.InsertRow, IrRowOpKind.ModifyRow, IrRowOpKind.EqualRow },
+            op.TableDiff!.RowOps.Select(r => r.Kind).ToArray());
+    }
+
+    [Fact]
+    public void Vertically_merged_rows_in_the_gap_keep_positional_row_pairs()
+    {
+        // Control for the case above: a vertical merge ties consecutive rows together, so inserting a row
+        // inside the merged run is a topology change the row fill does not reason about. The gap keeps the
+        // positional pairing: the second row is rewritten into X and the edited Beta row is the surplus tail.
+        var left = FromXml(GridTable(2000, 2,
+            Row(VMergedCell("Rotation plan heading"), Cell("one")),
+            Row(VMergedCell(null), Cell("winter wheat after maize")),
+            Row(Cell("C"), Cell("c"))));
+        var right = FromXml(GridTable(2000, 2,
+            Row(VMergedCell("Rotation plan heading revised"), Cell("one")),
+            Row(VMergedCell(null), Cell("1234")),
+            Row(VMergedCell(null), Cell("winter wheat after maize and clover")),
+            Row(Cell("C"), Cell("c"))));
+
+        var op = TableOp(left, right);
+        Assert.Equal(
+            new[] { IrRowOpKind.ModifyRow, IrRowOpKind.ModifyRow, IrRowOpKind.InsertRow, IrRowOpKind.EqualRow },
+            op.TableDiff!.RowOps.Select(r => r.Kind).ToArray());
+    }
+
     [Fact]
     public void Merged_or_offset_rows_keep_conservative_positional_cell_pairs()
     {
