@@ -302,7 +302,8 @@ public class DocxDiffRenumberedCaptionBookmarkTests
                 int next = 1000;
                 Docxodus.Ir.Diff.IrMarkupRenderer.CarryBookmarksOntoCommonText(
                     root.Descendants(W.bookmarkStart).ToList(), root.Descendants(W.bookmarkEnd).ToList(),
-                    new HashSet<string>(names), new HashSet<string>(names), () => next++);
+                    new HashSet<string>(names), new HashSet<string>(names),
+                    Docxodus.Ir.Diff.IrMarkupRenderer.CitedBookmarkNames(new[] { root }), () => next++);
                 main.PutXDocument();
             }
             bytes = stream.ToArray();
@@ -373,7 +374,8 @@ public class DocxDiffRenumberedCaptionBookmarkTests
         int next = 1000;
         bool changed = Docxodus.Ir.Diff.IrMarkupRenderer.CarryBookmarksOntoCommonText(
             root.Descendants(W.bookmarkStart).ToList(), root.Descendants(W.bookmarkEnd).ToList(),
-            new HashSet<string>(leftNames), new HashSet<string>(rightNames), () => next++);
+            new HashSet<string>(leftNames), new HashSet<string>(rightNames),
+            Docxodus.Ir.Diff.IrMarkupRenderer.CitedBookmarkNames(new[] { root }), () => next++);
         Assert.False(changed);
         Assert.Equal(before, root.ToString(SaveOptions.DisableFormatting));
     }
@@ -451,7 +453,7 @@ public class DocxDiffRenumberedCaptionBookmarkTests
             .Replace("</w:p>", "<w:bookmarkStart w:id=\"8\" w:name=\"_Hlk1\"/><w:bookmarkEnd w:id=\"8\"/></w:p>", StringComparison.Ordinal);
         AssertPassLeavesAlone(
             deleted + Whole("ins", "X", 2, "Figure 7", ": New A") +
-            "<w:p><w:r><w:instrText xml:space=\"preserve\"> REF _Hlk1 \\h </w:instrText></w:r></w:p>",
+            "<w:p>" + Field("REF _Hlk1 \\h", "Figure 7") + "</w:p>",
             new[] { "X", "_Hlk1" }, new[] { "X" });
     }
 
@@ -464,6 +466,97 @@ public class DocxDiffRenumberedCaptionBookmarkTests
             .Replace("<w:bookmarkEnd w:id=\"1\"/>", "<w:bookmarkStart w:id=\"8\" w:name=\"_Hlk2\"/><w:bookmarkEnd w:id=\"8\"/><w:bookmarkEnd w:id=\"1\"/>",
                      StringComparison.Ordinal);
         AssertPassLeavesAlone(deleted + Whole("ins", "X", 2, "Figure 7", ": New A"), new[] { "X", "_Hlk2" }, new[] { "X" });
+    }
+
+    /// <summary>A cross-reference bookmark of Word (<c>_Ref…</c>) opens before the moved one and spans the whole
+    /// caption, and only a footnote cites it: it is a target like any other, so the caption keeps the earlier
+    /// handling, and accepting leaves both bookmarks on the revision's text.</summary>
+    [Fact]
+    public void Compare_RefBookmarkOnTheWholeCaptionCitedOnlyByAFootnote_KeepsTheEarlierHandling()
+    {
+        const string moved = "_Ref_fig_legend";
+        const string whole = "_Ref123456";
+        static string Shape(string number, string text) =>
+            $"<w:p><w:bookmarkStart w:id=\"11\" w:name=\"{whole}\"/><w:bookmarkStart w:id=\"10\" w:name=\"{moved}\"/>" +
+            R("Figure ") + Field("SEQ Figure \\* ARABIC", number) + "<w:bookmarkEnd w:id=\"10\"/>" + R(text) +
+            "<w:bookmarkEnd w:id=\"11\"/></w:p>";
+        var note = "<w:p><w:r><w:t xml:space=\"preserve\">See </w:t></w:r><w:r><w:footnoteReference w:id=\"1\"/></w:r></w:p>";
+        var footnote = R("Compare ") + Field($"REF {whole} \\h", "Figure 24") + R(".");
+        var original = IrTestDocuments.FromBodyXmlWithFootnoteParagraph(
+            Intro + Shape("24", Legend) + Caption("25", Details) + Caption("26", Rows) + References(moved) + note, footnote);
+        var revised = IrTestDocuments.FromBodyXmlWithFootnoteParagraph(
+            Intro + Shape("24", Details) + Caption("25", Rows) + References(moved) + note, footnote);
+
+        var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
+
+        var failures = new List<string>();
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), new[] { moved, whole });
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), Array.Empty<string>());
+        CheckIdsAndSchema(failures, redline, original, revised);
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
+    /// <summary>An uncited <c>_Hlk</c> opens before the deleted label and closes after it: its range spans the copy,
+    /// so making the label unchanged would carry it into the accepted document, and the pair is left alone.</summary>
+    [Fact]
+    public void Pass_HiddenBookmarkSpanningTheDeletedLabel_LeavesThePairAlone()
+    {
+        var deleted = Whole("del", "X", 1, "Figure 7", ": Old A")
+            .Replace("<w:bookmarkStart w:id=\"1\"", "<w:bookmarkStart w:id=\"8\" w:name=\"_Hlk3\"/><w:bookmarkStart w:id=\"1\"", StringComparison.Ordinal)
+            .Replace("</w:p>", "<w:bookmarkEnd w:id=\"8\"/></w:p>", StringComparison.Ordinal);
+        AssertPassLeavesAlone(deleted + Whole("ins", "X", 2, "Figure 7", ": New A"), new[] { "X", "_Hlk3" }, new[] { "X" });
+    }
+
+    /// <summary>A field holding only a bookmark's name (<c>{ _Hlk4 }</c>, Word's implicit REF) cites it: the hidden
+    /// bookmark after the deleted label keeps the pair out.</summary>
+    [Fact]
+    public void Pass_HiddenBookmarkCitedByABareNameField_LeavesThePairAlone()
+    {
+        var deleted = Whole("del", "X", 1, "Figure 7", ": Old A")
+            .Replace("</w:p>", "<w:bookmarkStart w:id=\"8\" w:name=\"_Hlk4\"/><w:bookmarkEnd w:id=\"8\"/></w:p>", StringComparison.Ordinal);
+        AssertPassLeavesAlone(
+            deleted + Whole("ins", "X", 2, "Figure 7", ": New A") +
+            "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> _Hlk4 </w:instrText></w:r>" +
+            "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Old A</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>",
+            new[] { "X", "_Hlk4" }, new[] { "X" });
+    }
+
+    /// <summary>Only <c>_GoBack</c> and <c>_Hlk…</c> are let through: a <c>_Ref…</c> after the deleted label keeps
+    /// the pair out even when no field the pass reads cites it.</summary>
+    [Fact]
+    public void Pass_UncitedRefBookmarkAfterTheDeletedLabel_LeavesThePairAlone()
+    {
+        var deleted = Whole("del", "X", 1, "Figure 7", ": Old A")
+            .Replace("</w:p>", "<w:bookmarkStart w:id=\"8\" w:name=\"_Ref9\"/><w:bookmarkEnd w:id=\"8\"/></w:p>", StringComparison.Ordinal);
+        AssertPassLeavesAlone(deleted + Whole("ins", "X", 2, "Figure 7", ": New A"), new[] { "X", "_Ref9" }, new[] { "X" });
+    }
+
+    /// <summary>An <c>_Hlk</c> in the legend's text that only a footnote cites: the citing fields are read in every
+    /// story, so it keeps the caption out, and the legend's label stays deleted in the redline.</summary>
+    [Fact]
+    public void Compare_HiddenBookmarkCitedOnlyByAFootnote_KeepsTheEarlierHandling()
+    {
+        const string bookmark = "_Ref_fig_legend";
+        var legend = Caption("24", Legend, bookmark).Replace(R(Legend), R(": Legend of the ") +
+            "<w:bookmarkStart w:id=\"40\" w:name=\"_Hlk212345678\"/>" + R("general") + "<w:bookmarkEnd w:id=\"40\"/>" +
+            R(" site plans"), StringComparison.Ordinal);
+        var note = "<w:p><w:r><w:t xml:space=\"preserve\">See </w:t></w:r><w:r><w:footnoteReference w:id=\"1\"/></w:r></w:p>";
+        var footnote = R("Compare ") + Field("REF _Hlk212345678 \\h", "general") + R(".");
+        var original = IrTestDocuments.FromBodyXmlWithFootnoteParagraph(
+            Intro + legend + Caption("25", Details) + Caption("26", Rows) + References(bookmark) + note, footnote);
+        var revised = IrTestDocuments.FromBodyXmlWithFootnoteParagraph(
+            Intro + Caption("24", Details, bookmark) + Caption("25", Rows) + References(bookmark) + note, footnote);
+
+        var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
+
+        var legendInRedline = Body(redline).Elements(W.p).Single(p =>
+            string.Concat(p.Descendants().Where(e => e.Name == W.t || e.Name == W.delText).Select(e => e.Value))
+                .Contains("Legend", StringComparison.Ordinal));
+        Assert.Empty(legendInRedline.Descendants(W.t));
+        var failures = new List<string>();
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), new[] { bookmark });
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), Array.Empty<string>());
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
     }
 
     /// <summary>Captions only, renumbered in cascade, and the original's next caption carries its own bookmark on its

@@ -29,8 +29,9 @@ All notable changes to this project will be documented in this file.
   paragraphs between the two are moved out of the way, which changes neither view. This applies only when the two
   copies enclose the same text, fields and run formatting, the two paragraphs have the same properties, and no
   other bookmark sits in the deleted paragraph or in the revised one before the copy's end (a second bookmark on
-  the label, or one on the whole caption, would otherwise lose text on accept); Word's hidden bookmarks
-  (`_GoBack`, `_Hlk…`) that no field cites do not count when they sit outside both copies. Each pair is checked
+  the label, or one on the whole caption, would otherwise lose text on accept); only Word's position bookmarks
+  `_GoBack` and `_Hlk…` do not count, when no field or hyperlink of any story (body, headers, footers, notes,
+  comments) cites them and their whole range lies on one side of the copy. Each pair is checked
   again on the markup the earlier pairs left, and a paragraph holding one end of a range that continues elsewhere
   is not moved. Otherwise the earlier handling stays, and in those cases (a second bookmark on the caption, or any
   other condition not met) rejecting the redline in Word still loses the moved bookmark.

@@ -4785,7 +4785,7 @@ internal static partial class IrMarkupRenderer
 
         // (A0) A common bookmark whose original copy encloses deleted text and whose revised copy encloses the same
         // text elsewhere (a renumbered caption) moves onto that text, kept unchanged, as Word's compare does.
-        if (CarryBookmarksOntoCommonText(starts, ends, leftNames, rightNames, state))
+        if (CarryBookmarksOntoCommonText(starts, ends, leftNames, rightNames, CitedBookmarkNames(StoryRoots(main)), state))
         {
             changed = true;
             starts = body.Descendants(W.bookmarkStart).Where(IsRunLevelBookmark).ToList();
@@ -4927,18 +4927,19 @@ internal static partial class IrMarkupRenderer
     /// </summary>
     private static bool CarryBookmarksOntoCommonText(
         List<XElement> starts, List<XElement> ends, HashSet<string> leftNames, HashSet<string> rightNames,
-        RenderState state) =>
-        CarryBookmarksOntoCommonText(starts, ends, leftNames, rightNames, state.NextId);
+        HashSet<string> cited, RenderState state) =>
+        CarryBookmarksOntoCommonText(starts, ends, leftNames, rightNames, cited, state.NextId);
 
-    /// <summary>The pass over the given run-level bookmark markers; <paramref name="nextId"/> numbers the revision
-    /// wrappers it adds, which take author and date from the revision they split or from the deleted paragraph's
-    /// mark. Internal for the tests on hand-written redlines.</summary>
+    /// <summary>The pass over the given run-level bookmark markers; <paramref name="cited"/> holds the names the
+    /// fields and hyperlinks of every story cite (<see cref="CitedBookmarkNames"/>), and <paramref name="nextId"/>
+    /// numbers the revision wrappers it adds, which take author and date from the revision they split or from the
+    /// deleted paragraph's mark. Internal for the tests on hand-written redlines.</summary>
     internal static bool CarryBookmarksOntoCommonText(
         List<XElement> starts, List<XElement> ends, HashSet<string> leftNames, HashSet<string> rightNames,
-        Func<int> nextId)
+        HashSet<string> cited, Func<int> nextId)
     {
         var candidates = new List<CommonTextCandidate>();
-        var cited = CitedBookmarkNames(starts.FirstOrDefault()?.AncestorsAndSelf().Last());
+        var (startOf, endOf) = PairBookmarkMarkers(starts.Concat(ends).FirstOrDefault()?.AncestorsAndSelf().Last());
         foreach (var grp in starts.Where(s => (string?)s.Attribute(W.name) != null)
                      .GroupBy(s => (string)s.Attribute(W.name)!))
         {
@@ -4969,7 +4970,7 @@ internal static partial class IrMarkupRenderer
                 || touched.Contains(first.DelParagraph) || touched.Contains(first.NewParagraph))
                 continue;
             var own = new HashSet<XElement>(members.SelectMany(m => new[] { m!.DelStart, m.DelEnd, m.KeepStart, m.KeepEnd }));
-            if (HasForeignRangeMarker(first, own, cited))
+            if (HasForeignRangeMarker(first, own, cited, startOf, endOf))
                 continue;
             touched.Add(first.DelParagraph);
             touched.Add(first.NewParagraph);
@@ -5006,7 +5007,7 @@ internal static partial class IrMarkupRenderer
 
     /// <summary>The pair of copies of one bookmark name as a rewrite candidate, read from the markup as it is now, or
     /// null when a condition of <see cref="CarryBookmarksOntoCommonText(List{XElement}, List{XElement}, HashSet{string},
-    /// HashSet{string}, RenderState)"/> fails. Each end is the first end with the start's id after it in the start's
+    /// HashSet{string}, HashSet{string}, RenderState)"/> fails. Each end is the first end with the start's id after it in the start's
     /// own paragraph: before step (B) the two sources' ids can coincide.</summary>
     private static CommonTextCandidate? TryBuildCommonTextCandidate(XElement delStart, XElement keepStart, List<XElement> ends)
     {
@@ -5052,23 +5053,26 @@ internal static partial class IrMarkupRenderer
     /// <summary>True iff a range marker other than the group's own would end up around rewritten text: any bookmark
     /// marker in the deleted paragraph (its text becomes unchanged), any bookmark marker in the revised paragraph
     /// before the copy's end (that text becomes deleted), or a comment or permission range marker inside either
-    /// copy. Word's hidden bookmarks (a name starting with <c>_</c>, such as <c>_GoBack</c> or <c>_Hlk…</c>) that no
-    /// field or hyperlink cites do not count when they sit outside both copies: nothing reads where they end up.</summary>
-    private static bool HasForeignRangeMarker(CommonTextCandidate c, HashSet<XElement> own, HashSet<string> cited)
+    /// copy. The one exception is Word's own position bookmarks, <c>_GoBack</c> and <c>_Hlk…</c>, when no field or
+    /// hyperlink of any story cites them and their whole range lies on one side of the copy: nothing reads where
+    /// they end up. Cross-reference bookmarks (<c>_Ref…</c>, <c>_Toc…</c>) always count, cited or not, since a
+    /// field in a story this pass does not read may cite them. <paramref name="startOf"/> and
+    /// <paramref name="endOf"/> pair each marker with its other end, by id and order.</summary>
+    private static bool HasForeignRangeMarker(CommonTextCandidate c, HashSet<XElement> own, HashSet<string> cited,
+        Dictionary<XElement, XElement> startOf, Dictionary<XElement, XElement> endOf)
     {
         static bool IsBookmarkMarker(XElement e) => e.Name == W.bookmarkStart || e.Name == W.bookmarkEnd;
         static bool IsOtherRangeMarker(XElement e) =>
             e.Name == W.commentRangeStart || e.Name == W.commentRangeEnd || e.Name == W.permStart || e.Name == W.permEnd;
-        static bool Inside(XElement e, XElement start, XElement end) => e.IsAfter(start) && e.IsBefore(end);
-        bool Ignorable(XElement e, XElement start, XElement end)
+        bool Ignorable(XElement e, XElement copyStart, XElement copyEnd)
         {
-            var named = e.Name == W.bookmarkStart
-                ? e
-                : e.Ancestors().Last().Descendants(W.bookmarkStart).LastOrDefault(b =>
-                    (string?)b.Attribute(W.id) == (string?)e.Attribute(W.id) && b.IsBefore(e));
-            var name = (string?)named?.Attribute(W.name);
-            return name != null && name.StartsWith("_", StringComparison.Ordinal) && !cited.Contains(name)
-                && !Inside(e, start, end);
+            var start = e.Name == W.bookmarkStart ? e : startOf.GetValueOrDefault(e);
+            var end = start == null ? null : endOf.GetValueOrDefault(start);
+            var name = (string?)start?.Attribute(W.name);
+            if (start == null || end == null || name == null || cited.Contains(name)
+                || !(name == "_GoBack" || name.StartsWith("_Hlk", StringComparison.Ordinal)))
+                return false;
+            return (start.IsBefore(copyStart) && end.IsBefore(copyStart)) || (start.IsAfter(copyEnd) && end.IsAfter(copyEnd));
         }
         return c.DelParagraph.Descendants().Any(e => IsBookmarkMarker(e) && !own.Contains(e)
                                                      && !Ignorable(e, c.DelStart, c.DelEnd))
@@ -5078,26 +5082,99 @@ internal static partial class IrMarkupRenderer
             || c.NewParagraph.Descendants().Any(e => IsOtherRangeMarker(e) && e.IsAfter(c.KeepStart) && e.IsBefore(c.KeepEnd));
     }
 
-    /// <summary>The bookmark names a REF, PAGEREF or NOTEREF field, a HYPERLINK \\l field or an internal hyperlink
-    /// cites anywhere in the redline (both documents' fields are in it, the deleted ones as <c>w:delInstrText</c>).
-    /// A field's instruction can be split across runs, so each paragraph's instruction text is read as one.</summary>
-    private static HashSet<string> CitedBookmarkNames(XElement? root)
+    /// <summary>Pair every bookmark start with its end in the root, by id and document order (the latest open start
+    /// with the end's id), built once for the pass: before step (B) the two sources' ids can coincide.</summary>
+    private static (Dictionary<XElement, XElement> StartOf, Dictionary<XElement, XElement> EndOf) PairBookmarkMarkers(XElement? root)
+    {
+        var startOf = new Dictionary<XElement, XElement>();
+        var endOf = new Dictionary<XElement, XElement>();
+        if (root == null)
+            return (startOf, endOf);
+        var open = new Dictionary<string, Stack<XElement>>(StringComparer.Ordinal);
+        foreach (var e in root.Descendants().Where(e => e.Name == W.bookmarkStart || e.Name == W.bookmarkEnd))
+        {
+            var id = (string?)e.Attribute(W.id) ?? "";
+            if (e.Name == W.bookmarkStart)
+            {
+                if (!open.TryGetValue(id, out var stack))
+                    open[id] = stack = new Stack<XElement>();
+                stack.Push(e);
+            }
+            else if (open.TryGetValue(id, out var stack) && stack.Count > 0)
+            {
+                var start = stack.Pop();
+                startOf[e] = start;
+                endOf[start] = e;
+            }
+        }
+        return (startOf, endOf);
+    }
+
+    /// <summary>The roots of every story of the redline: body, headers, footers, footnotes, endnotes, comments.</summary>
+    private static IEnumerable<XElement?> StoryRoots(MainDocumentPart main)
+    {
+        yield return main.GetXDocument().Root;
+        foreach (var part in main.HeaderParts)
+            yield return part.GetXDocument().Root;
+        foreach (var part in main.FooterParts)
+            yield return part.GetXDocument().Root;
+        yield return main.FootnotesPart?.GetXDocument().Root;
+        yield return main.EndnotesPart?.GetXDocument().Root;
+        yield return main.WordprocessingCommentsPart?.GetXDocument().Root;
+    }
+
+    /// <summary>The bookmark names the fields and hyperlinks of the given stories cite (both documents' fields are in
+    /// the redline, the deleted ones as <c>w:delInstrText</c>): the name after REF, PAGEREF or NOTEREF or after a
+    /// <c>\l</c> switch, the first word of every field (a field holding only a bookmark's name is Word's implicit
+    /// REF), and every internal hyperlink's anchor. A field's instruction is read whole across its runs; reading a
+    /// first word that is a field keyword only adds a name no bookmark has.</summary>
+    internal static HashSet<string> CitedBookmarkNames(IEnumerable<XElement?> roots)
     {
         var cited = new HashSet<string>(StringComparer.Ordinal);
-        if (root == null)
-            return cited;
-        var instructions = root.Descendants(W.p).Select(p => string.Concat(p.Descendants()
-                .Where(e => e.Name == W.instrText || e.Name == W.delInstrText).Select(e => e.Value)))
-            .Concat(root.Descendants(W.fldSimple).Select(f => (string?)f.Attribute(W.instr) ?? ""));
         var reference = new System.Text.RegularExpressions.Regex(
             "(?:\\b(?:PAGEREF|NOTEREF|REF)\\s+|\\\\l\\s+)\"?([^\\s\"\\\\]+)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        foreach (var instruction in instructions)
+        void Read(string instruction)
+        {
             foreach (System.Text.RegularExpressions.Match m in reference.Matches(instruction))
                 cited.Add(m.Groups[1].Value);
-        foreach (var h in root.Descendants(W.hyperlink))
-            if ((string?)h.Attribute(W.anchor) is { } anchor)
-                cited.Add(anchor);
+            var words = instruction.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length > 0)
+                cited.Add(words[0].Trim('"'));
+        }
+        foreach (var root in roots)
+        {
+            if (root == null)
+                continue;
+            var fields = new Stack<System.Text.StringBuilder?>();
+            foreach (var e in root.Descendants())
+            {
+                if (e.Name == W.fldChar)
+                {
+                    var type = (string?)e.Attribute(W.fldCharType);
+                    if (type == "begin")
+                        fields.Push(new System.Text.StringBuilder());
+                    else if ((type == "separate" || type == "end") && fields.Count > 0)
+                    {
+                        if (fields.Peek() is { } text)
+                            Read(text.ToString());
+                        if (type == "end")
+                            fields.Pop();
+                        else
+                        {
+                            fields.Pop();
+                            fields.Push(null);
+                        }
+                    }
+                }
+                else if ((e.Name == W.instrText || e.Name == W.delInstrText) && fields.Count > 0 && fields.Peek() is { } text)
+                    text.Append(e.Value);
+                else if (e.Name == W.fldSimple)
+                    Read((string?)e.Attribute(W.instr) ?? "");
+                else if (e.Name == W.hyperlink && (string?)e.Attribute(W.anchor) is { } anchor)
+                    cited.Add(anchor);
+            }
+        }
         return cited;
     }
 
