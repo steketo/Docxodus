@@ -47,12 +47,14 @@ public class DocxDiffRenumberedCaptionBookmarkTests
         string.Concat(bookmarks.Select((_, i) => $"<w:bookmarkEnd w:id=\"{10 + i}\"/>")) +
         R(text) + "</w:p>";
 
-    private static string Image(string relId, int id) =>
+    /// <summary>An image paragraph. Without <paramref name="name"/> the names follow the id; with it both names are
+    /// fixed, as in a report whose pictures Word names alike and renumbers only by id.</summary>
+    private static string Image(string relId, int id, string? name = null) =>
         "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"100\" cy=\"200\"/>" +
-        $"<wp:docPr id=\"{id}\" name=\"Picture {id}\"/>" +
+        $"<wp:docPr id=\"{id}\" name=\"{name ?? $"Picture {id}"}\"/>" +
         "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
         "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
-        $"<pic:nvPicPr><pic:cNvPr id=\"{id}\" name=\"image{id}.png\"/><pic:cNvPicPr/></pic:nvPicPr>" +
+        $"<pic:nvPicPr><pic:cNvPr id=\"{id}\" name=\"{name ?? $"image{id}.png"}\"/><pic:cNvPicPr/></pic:nvPicPr>" +
         $"<pic:blipFill><a:blip r:embed=\"{relId}\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>" +
         "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"100\" cy=\"200\"/></a:xfrm>" +
         "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>" +
@@ -224,6 +226,63 @@ public class DocxDiffRenumberedCaptionBookmarkTests
             string.Concat(p.Descendants().Where(e => e.Name == W.t || e.Name == W.delText).Select(e => e.Value))
                 .Contains("Legend", StringComparison.Ordinal));
         Assert.Empty(legend.Descendants(W.t));
+    }
+
+    // ---- picture ids renumbered by Word (AutoRel SCR-4) ------------------------------------------------------------
+
+    /// <summary>The same picture, with the same bytes and the same presentation, under a renumbered non-visual id:
+    /// Word renumbers <c>pic:cNvPr/@id</c> like <c>wp:docPr/@id</c> when a figure before it is removed. The picture is
+    /// unchanged, and the comparison must not delete and reinsert it.</summary>
+    [Fact]
+    public void Compare_PictureWithARenumberedNonVisualId_IsUnchanged()
+    {
+        var original = IrTestDocuments.FromBodyXmlWithImageParts(Intro + Image("rIdB", 2, "Picture"), ("rIdB", Png(2)));
+        var revised = IrTestDocuments.FromBodyXmlWithImageParts(Intro + Image("rIdB", 1, "Picture"), ("rIdB", Png(2)));
+
+        var body = Body(DocxCompare.Compare(original, revised).DocumentByteArray);
+
+        Assert.Empty(body.Descendants().Where(e => e.Name == W.ins || e.Name == W.del));
+    }
+
+    /// <summary>The real report's shape (Loreo, mitigation report 006): a figure is removed, Word renumbers the
+    /// non-visual ids of the pictures after it, and the next caption, which carries its OWN bookmark in both documents,
+    /// only changes its <c>SEQ</c> result from 25 to 24. The caption must be paired and changed inside the field, so
+    /// that its bookmark encloses "Figure 25" when the redline is rejected and "Figure 24" when it is accepted. Before
+    /// the fix the renumbered pictures hashed differently, the block alignment found no equal picture around the
+    /// caption, and the caption was deleted and reinserted whole: the bookmark stayed on the inserted copy only, and
+    /// Word, rejecting the redline, removed it with the copy.</summary>
+    [Fact]
+    public void Compare_OwnBookmarkOnACaptionAfterARemovedFigure_EnclosesTheCaptionInBothViews()
+    {
+        var bookmarks = new[] { "_Ref_fig_types_a_b" };
+        var original = IrTestDocuments.FromBodyXmlWithImageParts(
+            Intro + Image("rIdA", 1, "Picture") + Caption("24", Legend) + Image("rIdB", 2, "Picture") +
+            Caption("25", Details, bookmarks) + Image("rIdC", 3, "Picture") + Caption("26", Rows) + References(bookmarks),
+            ("rIdA", Png(1)), ("rIdB", Png(2)), ("rIdC", Png(3)));
+        var revised = IrTestDocuments.FromBodyXmlWithImageParts(
+            Intro + Image("rIdB", 1, "Picture") + Caption("24", Details, bookmarks) + Image("rIdC", 2, "Picture") +
+            Caption("25", Rows) + References(bookmarks),
+            ("rIdB", Png(2)), ("rIdC", Png(3)));
+
+        var redline = DocxCompare.Compare(original, revised).DocumentByteArray;
+
+        var failures = new List<string>();
+        // The details' text is unchanged: it must stay common text, outside any w:ins or w:del, in one paragraph
+        // whose mark is neither inserted nor deleted.
+        var detailsText = Body(redline).Descendants(W.t).Where(t => t.Value.Contains("green belts")).ToList();
+        if (detailsText.Count != 1 || detailsText[0].Ancestors().Any(a => a.Name == W.ins || a.Name == W.del))
+            failures.Add($"redline: the details' text is on {detailsText.Count} run(s), or inside a revision");
+        else if (detailsText[0].Ancestors(W.p).First().Elements(W.pPr).Elements(W.rPr).Elements()
+                 .Any(e => e.Name == W.ins || e.Name == W.del))
+            failures.Add("redline: the details' caption has an inserted or deleted paragraph mark");
+        int pictureRevisions = Body(redline).Elements(W.p)
+            .Count(p => p.Descendants(W.drawing).Any() && p.Descendants().Any(e => e.Name == W.ins || e.Name == W.del));
+        if (pictureRevisions != 1)
+            failures.Add($"redline: {pictureRevisions} picture paragraph(s) with a revision, expected 1 (the removed figure)");
+        CompareView(failures, "accept", revised.DocumentByteArray, DocxDiffOps.AcceptRevisions(redline), bookmarks);
+        CompareView(failures, "reject", original.DocumentByteArray, DocxDiffOps.RejectRevisions(redline), bookmarks);
+        CheckIdsAndSchema(failures, redline, original, revised);
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
     }
 
     private static void CompareView(List<string> failures, string view, byte[] expected, byte[] actual, string[] bookmarks)

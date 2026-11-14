@@ -33,6 +33,11 @@ internal static class IrHasher
     private static readonly XName WpDocPr =
         (XNamespace)"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" + "docPr";
 
+    // pic:cNvPr/@id — the picture's own non-visual id inside the graphic. Word renumbers it together with
+    // wp:docPr/@id when a drawing before it is removed or inserted, so it carries no content meaning either.
+    private static readonly XName PicCNvPr =
+        (XNamespace)"http://schemas.openxmlformats.org/drawingml/2006/picture" + "cNvPr";
+
     // Word 2010's drawing anchor/edit ids are likewise opaque per-edit identifiers rather than presentation
     // state. They are frequently added/removed by Word around an otherwise unchanged inline image.
     private static readonly XNamespace Wp14 =
@@ -226,6 +231,12 @@ internal static class IrHasher
         // CloneBlockLevelContentForHashing dropping wp:docPr/@id). Two otherwise-identical drawings whose
         // docPr ids differ (the WC-1940 / WC052-SmartArt case) must canonicalize equal.
         if (attribute.Name == "id" && attribute.Parent?.Name == WpDocPr)
+            return true;
+
+        // pic:cNvPr/@id — renumbered by Word with wp:docPr/@id. Kept, an unchanged picture after a removed figure
+        // hashed as a different picture: the block alignment lost its anchors around the picture, and the caption
+        // next to it, whose only change was its SEQ result, was deleted and reinserted whole (AutoRel SCR-4).
+        if (attribute.Name == "id" && attribute.Parent?.Name == PicCNvPr)
             return true;
 
         // A bookmark's w:id only links its start to its end; the comparison renumbers colliding ids (issue #840),
